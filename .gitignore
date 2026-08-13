@@ -1,0 +1,5 @@
+generated/
+.env
+.env.*
+__pycache__/
+.codex-remote-attachments/

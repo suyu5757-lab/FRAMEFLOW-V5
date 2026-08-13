@@ -4,7 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#11110f" />
+  <meta name="description" content="FRAMEFLOW 本地优先 AI 视频制作工作台，覆盖分镜、资产、镜头、配音配乐、生成与质检交付。" />
   <title>FRAMEFLOW · 个人 AI 视频工作台</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%23d7ff4b%22/><text x=%2232%22 y=%2245%22 text-anchor=%22middle%22 font-size=%2242%22 font-family=%22serif%22 font-weight=%22900%22 fill=%22%2311150a%22>F</text></svg>" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -22,6 +24,7 @@
         <button class="nav-item" data-view="assets"><span>◇</span> 资产工坊 <i id="assetBadge">5</i></button>
         <p>制作</p>
         <button class="nav-item" data-view="shots"><span>▦</span> 镜头导演</button>
+        <button class="nav-item" data-view="audio"><span>◉</span> 配音与声音 <i id="audioBadge">0</i></button>
         <button class="nav-item" data-view="generate"><span>▶</span> 生成工作台</button>
         <p>后期</p>
         <button class="nav-item" data-view="review"><span>✓</span> 质检与交付</button>
@@ -72,6 +75,7 @@
   </dialog>
 
   <div id="toast" role="status"></div>
+  <script src="audio.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
