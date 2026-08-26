@@ -7,7 +7,8 @@ Revises:
 from __future__ import annotations
 
 from alembic import op
-from sqlalchemy.schema import CreateTable, DropTable
+from alembic import context
+from sqlalchemy.schema import CreateTable
 
 from core.schemas.runtime_mvp import (
     RUNTIME_PRAGMA_STATEMENTS,
@@ -23,16 +24,26 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """Emit the 11-table MVP and required SQLite pragmas in offline mode."""
+    """Create the 11-table MVP on the explicit candidate connection."""
 
-    for statement in RUNTIME_PRAGMA_STATEMENTS:
-        op.execute(statement.rstrip(";"))
-    for table in metadata.sorted_tables:
-        op.execute(CreateTable(table))
+    # Online env.py applies these before Alembic opens its migration
+    # transaction.  journal_mode=WAL can implicitly commit in SQLite, so it
+    # must not run inside the revision transaction.  Keep the statements in
+    # offline SQL for reproducible dry-runs.
+    if context.is_offline_mode():
+        for statement in RUNTIME_PRAGMA_STATEMENTS:
+            op.execute(statement.rstrip(";"))
+        for table in metadata.sorted_tables:
+            op.execute(CreateTable(table))
+    else:
+        metadata.create_all(op.get_bind(), checkfirst=False)
 
 
 def downgrade() -> None:
-    """Emit the reverse table order; online execution is blocked by env.py."""
+    """Drop only the candidate Runtime MVP tables in reverse dependency order."""
 
-    for table_name in reversed(RUNTIME_TABLE_NAMES):
-        op.execute(DropTable(metadata.tables[table_name]))
+    if context.is_offline_mode():
+        for table_name in reversed(RUNTIME_TABLE_NAMES):
+            op.execute(f'DROP TABLE "{table_name}"')
+    else:
+        metadata.drop_all(op.get_bind(), checkfirst=False)
