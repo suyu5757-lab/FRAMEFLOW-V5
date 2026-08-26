@@ -200,3 +200,71 @@ A disposable branch `codex/t01.5-rollback-probe` was created from `dev/v5.3.2`. 
 ### Step 7 — Gate 0 conclusion
 
 **Gate 0 — MIGRATION SAFE: PASS.** The stable Tag, development branch, expanded sync audit, three-color policy, dirty-tree abort policy, migration safety skeleton, and real rollback evidence are present. No T02 or feature work is authorized by this result; the next task must still be explicitly issued.
+
+## T01.5-R Remediation — Git & Skill Migration Safety
+
+审计日期：2026-08-26。此章节追加在 T00 原始快照和 T01.5 历史记录之后；历史章节不改写。
+
+### Remediation baseline
+
+- 当前项目分支：`dev/v5.3.2`。
+- T01-R 提交前 HEAD：`2438d1f0f82fc7a095e02f7d7867d103c8b11b5a`。
+- `main`：`7e405b4cfa8f8e91ed58863e1114c6bfcf7b6641`，未推进。
+- `v5.3.2-gate0-baseline`：仍解析到 `7e405b4cfa8f8e91ed58863e1114c6bfcf7b6641`。
+- 既有 dirty tree、用户修改和未跟踪文件保持不变，没有 reset、restore、clean 或 stash。
+
+### Skill Git ownership and stable restore
+
+`D:\11067\CodexHome\skills` 在 remediation 前不是 Git repo；上级 `D:\11067\CodexHome` 也不是 repo，没有发现 worktree/junction/symlink 或项目跟踪关系。本轮在完成 ownership/discovery 分析后，为该目录建立独立本地 Git repo：
+
+```text
+tag: frameflow-skills-baseline-20260826
+commit: 36b894759f121bd053213160dea42fcd39defc01
+files: 117 non-generated files / 21 SKILL.md
+remote: none
+```
+
+快照排除现有 `__pycache__/*.pyc`，未修改 Skill 文件内容、路径或 discovery。项目 stable tag 与 Skill stable tag 是两个明确的保护层：前者恢复项目，后者恢复真实 Skill root。
+
+### Auto-sync discovery decision
+
+扩展检查了 Task Scheduler、用户/系统 Startup、Registry Run、PowerShell profiles、桌面源、项目脚本、Skill root、历史 `D:\AIGC\SUYU` 和外部 runtime。现有三个 FRAMEFLOW Scheduled Task 只负责 OpenCode/V3 服务启动或关闭，未发现 Git 命令；桌面源 `C:\Users\11067\Desktop\video 工作台制作` 不存在；Startup 仅有 `desktop.ini`；相关 Registry Run 项不存在。
+
+结论：
+
+```text
+NO_EXISTING_AUTO_SYNC_CONFIRMED
+SCHEDULER_NOT_PREEXISTING
+```
+
+本轮没有伪造 daily trigger，没有修改已有任务。canonical mechanism 已建立于：
+
+```text
+scripts/git/frameflow_safe_sync.ps1
+```
+
+它每次检测 `git branch --show-current`，detached HEAD、进行中操作 marker、unmerged files、pre-existing staged changes 时 `ABORT SAFE`；dirty tree 只允许显式 `-Path`，不清理、不 stash、不丢弃；clean tree 返回 `NO_CHANGES`；提交后只执行 `git push <Remote> <CURRENT_BRANCH>`，push 失败不自动 pull/rebase/merge/force。
+
+### Static and fixture evidence
+
+- PowerShell script parse：PASS。
+- 禁止模式 `reset --hard`、`checkout .`、`restore .`、`clean -fd`、`push --force`、`push -f`：全部未发现。
+- `python -m unittest discover -s tests/git_safety -p "test_*.py" -v`：exit `0`，10 tests passed，0 failed，0 blocked。
+- G1 dev push isolation：PASS，remote dev 更新、remote main 不变。
+- G2 conflict abort：PASS，真实 `AA` unmerged 保留、无 commit/push/resolution。
+- G3 no branch switch：PASS。
+- G4 dirty/untracked preservation：PASS。
+- G5 stable Skill restore：PASS；隔离 fixture stable contract 与真实 Skill stable tag 的 `character_asset_check.py` 均恢复并执行成功。
+
+### Remote probe
+
+`git ls-remote --tags origin refs/tags/v5.3.2-gate0-baseline` 因 GitHub Schannel `SEC_E_NO_CREDENTIALS (0x8009030e)` 阻塞。没有修改 credentials、没有运行 remote push、没有声称远端 tag 存在或不存在；本地 tag 不变。
+
+### Remediation verdict
+
+```text
+T01.5-R = PASS
+Gate 0 — MIGRATION SAFE = PASS
+```
+
+完整证据见 `docs/T01_5_MIGRATION_SAFETY_REPORT.md`。本章节不授权 T02-R、T03-R 或 T05；完成本 Task 后必须停止并等待下一条明确指令。
