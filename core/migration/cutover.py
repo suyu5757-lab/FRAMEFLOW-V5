@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import sqlite3
 import shutil
 import tempfile
 from datetime import UTC, datetime
@@ -32,10 +33,99 @@ from .validation import validate_candidate
 
 
 REQUIRED_LEGACY_SHOTS = tuple(f"SH{number:03d}" for number in range(4, 21))
+PROJECT_ROOT = CANONICAL_DATABASE_PATH.parent.parent
+DEFAULT_CUTOVER_STAGING_ROOT = CANONICAL_DATABASE_PATH.parent / ".cutover"
+DEFAULT_ARCHIVE_ROOT = PROJECT_ROOT / "archives" / "migrations" / "v5.3.2"
 
 
 class CutoverBlocked(RuntimeError):
     """Raised when a required T03-R gate is not satisfied."""
+
+
+def volume_key(path: Path | str) -> str:
+    """Return a stable volume identity for an existing or planned path."""
+
+    resolved = Path(path).expanduser().resolve(strict=False)
+    if resolved.drive:
+        return resolved.drive.rstrip("\\/").upper()
+    try:
+        return f"st_dev:{resolved.stat().st_dev}"
+    except FileNotFoundError:
+        return f"st_dev:{resolved.parent.stat().st_dev}"
+
+
+def cutover_path_info(
+    candidate: Path | str,
+    production: Path | str = CANONICAL_DATABASE_PATH,
+    legacy_archive: Path | str | None = None,
+) -> dict[str, Any]:
+    """Describe the volumes used by a planned atomic replacement."""
+
+    candidate_path = Path(candidate).expanduser().resolve(strict=False)
+    production_path = Path(production).expanduser().resolve(strict=False)
+    archive_path = (
+        Path(legacy_archive).expanduser().resolve(strict=False)
+        if legacy_archive is not None
+        else None
+    )
+    candidate_volume = volume_key(candidate_path)
+    production_volume = volume_key(production_path)
+    archive_volume = volume_key(archive_path) if archive_path is not None else None
+    volumes = [candidate_volume, production_volume]
+    if archive_volume is not None:
+        volumes.append(archive_volume)
+    return {
+        "candidate": str(candidate_path),
+        "production": str(production_path),
+        "legacy_archive": str(archive_path) if archive_path is not None else None,
+        "candidate_volume": candidate_volume,
+        "production_volume": production_volume,
+        "archive_volume": archive_volume,
+        "same_volume": len(set(volumes)) == 1,
+    }
+
+
+def default_cutover_staging_root() -> Path:
+    """Return the explicit same-volume staging root for production cutover."""
+
+    return DEFAULT_CUTOVER_STAGING_ROOT
+
+
+def handle_free_rename_probe(path: Path | str) -> dict[str, Any]:
+    """Rename a closed candidate away and back to prove Windows can release it."""
+
+    resolved = Path(path).expanduser().resolve(strict=False)
+    if not resolved.is_file():
+        raise CutoverBlocked(f"rename probe target does not exist: {resolved}")
+    probe = resolved.with_name(f"{resolved.stem}.rename_probe{resolved.suffix}")
+    if probe.exists():
+        raise CutoverBlocked(f"rename probe target already exists: {probe}")
+    try:
+        os.replace(resolved, probe)
+        os.replace(probe, resolved)
+    except Exception:
+        # Restore the original name if the second rename is the failing side.
+        if probe.exists() and not resolved.exists():
+            os.replace(probe, resolved)
+        raise
+    return {"path": str(resolved), "probe": str(probe), "passed": True}
+
+
+def checkpoint_database(path: Path | str) -> dict[str, Any]:
+    """Checkpoint a closed-file candidate with an explicit connection close."""
+
+    resolved = Path(path).expanduser().resolve(strict=False)
+    if not resolved.is_file():
+        raise CutoverBlocked(f"checkpoint target does not exist: {resolved}")
+    connection = sqlite3.connect(str(resolved), timeout=5)
+    try:
+        connection.execute("PRAGMA busy_timeout=5000")
+        checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+        connection.commit()
+        return {"path": str(resolved), "checkpoint": checkpoint, "integrity_check": integrity}
+    finally:
+        connection.close()
 
 
 def _sha256(path: Path) -> str:
@@ -67,17 +157,35 @@ def fresh_candidate_from_production(
     *,
     source: Path | str = CANONICAL_DATABASE_PATH,
     work_dir: Path | str | None = None,
+    staging_root: Path | str | None = None,
     run_id: str | None = None,
 ) -> dict[str, Any]:
-    """Build a fresh candidate and fresh backup from the current source."""
+    """Build a fresh candidate and backup in an explicit staging directory.
+
+    When no ``work_dir`` is supplied, production callers are kept off the
+    process TEMP directory and use ``data/.cutover/<run_id>`` on the same
+    volume as the canonical database.  Tests and rehearsals may still pass an
+    explicit ``work_dir``.
+    """
 
     source_path = Path(source).expanduser().resolve(strict=False)
     token = run_id or f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
-    root = (
-        Path(work_dir).expanduser().resolve(strict=False)
-        if work_dir is not None
-        else Path(tempfile.gettempdir()) / f"frameflow-t03-{token}"
-    )
+    if work_dir is not None:
+        root = Path(work_dir).expanduser().resolve(strict=False)
+    else:
+        base = (
+            Path(staging_root).expanduser().resolve(strict=False)
+            if staging_root is not None
+            else DEFAULT_CUTOVER_STAGING_ROOT
+        )
+        root = base / token
+    if source_path == CANONICAL_DATABASE_PATH and work_dir is None:
+        path_info = cutover_path_info(root, source_path)
+        if not path_info["same_volume"]:
+            raise CutoverBlocked(
+                "same-volume staging is required for production candidate: "
+                f"{path_info}"
+            )
     root.mkdir(parents=True, exist_ok=True)
     backup_path = root / "legacy-snapshot.db"
     candidate_path = root / "v5-candidate.db"
@@ -195,6 +303,8 @@ def perform_production_cutover(
     legacy_source: Path | str = CANONICAL_DATABASE_PATH,
     production_cutover: bool = False,
     no_active_writer: Callable[[], bool] | None = None,
+    candidate_handle_free: bool = False,
+    legacy_archive_verified: bool = False,
 ) -> dict[str, Any]:
     """Atomically place a verified candidate, only with explicit authorization.
 
@@ -213,8 +323,21 @@ def perform_production_cutover(
         raise CutoverBlocked("legacy_source must be the canonical production path")
     if candidate_path == CANONICAL_DATABASE_PATH:
         raise CutoverBlocked("candidate path must differ from canonical production path")
-    if archive_path.exists():
+    path_info = cutover_path_info(candidate_path, source_path, archive_path)
+    if not path_info["same_volume"]:
+        raise CutoverBlocked(
+            "same-volume guard failed before any move or replace: "
+            f"{path_info}"
+        )
+    if not candidate_handle_free:
+        raise CutoverBlocked("candidate handle-free rename proof is required before production replacement")
+    archive_precreated = archive_path.exists()
+    if archive_precreated and not legacy_archive_verified:
         raise CutoverBlocked(f"refusing to overwrite rollback archive: {archive_path}")
+    if legacy_archive_verified and not archive_precreated:
+        raise CutoverBlocked(
+            f"verified rollback archive is missing before replacement: {archive_path}"
+        )
     if no_active_writer is None or not no_active_writer():
         raise CutoverBlocked("no_active_writer proof is required before production replacement")
     if not candidate_path.is_file():
@@ -224,17 +347,36 @@ def perform_production_cutover(
         raise CutoverBlocked(
             "legacy WAL/SHM sidecars must be checkpointed and verified absent before replacement"
         )
-    before = fingerprint_database(source_path)
+    # Do not reopen SQLite after the sidecar gate.  The source has already
+    # been inspected by the caller; opening a legacy WAL database read-only
+    # can recreate ``-shm`` on some SQLite builds between the gate and move.
+    before = {
+        "path": str(source_path),
+        "size": source_path.stat().st_size,
+        "mtime_ns": source_path.stat().st_mtime_ns,
+        "sha256": _sha256(source_path),
+    }
     archive_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(source_path), str(archive_path))
+    moved_source = False
+    if not archive_precreated:
+        shutil.move(str(source_path), str(archive_path))
+        moved_source = True
     try:
         os.replace(candidate_path, source_path)
     except Exception:
-        # Restore the original path on the same-volume replacement failure.
-        os.replace(archive_path, source_path)
+        # Restore only when this operation moved the original source away.
+        # A pre-created verified archive remains intact for rollback review.
+        if moved_source:
+            os.replace(archive_path, source_path)
         raise
     after = fingerprint_database(source_path)
-    return {"before": before, "after": after, "legacy_archive": str(archive_path)}
+    return {
+        "before": before,
+        "after": after,
+        "legacy_archive": str(archive_path),
+        "path_info": path_info,
+        "legacy_archive_precreated": archive_precreated,
+    }
 
 
 def _parse_args() -> argparse.Namespace:

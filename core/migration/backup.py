@@ -46,7 +46,9 @@ def _sha256(path: Path) -> str:
 def _read_only(path: Path) -> sqlite3.Connection:
     if not path.is_file():
         raise BackupError(f"SQLite source does not exist: {path}")
-    connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    connection = sqlite3.connect(
+        f"file:{path.as_posix()}?mode=ro&immutable=1", uri=True
+    )
     connection.row_factory = sqlite3.Row
     return connection
 

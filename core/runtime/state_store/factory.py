@@ -53,7 +53,12 @@ def _read_only(path: Path) -> sqlite3.Connection:
     if not path.is_file():
         raise RuntimeOwnershipError(f"runtime database does not exist: {path}")
     try:
-        connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        # ``immutable=1`` keeps inspection of a stopped legacy database from
+        # creating ``-wal``/``-shm`` sidecars.  Cutover must be able to prove
+        # those sidecars are absent immediately before the atomic swap.
+        connection = sqlite3.connect(
+            f"file:{path.as_posix()}?mode=ro&immutable=1", uri=True
+        )
         connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
     except sqlite3.DatabaseError as exc:
         raise RuntimeOwnershipError(f"runtime database is not readable: {path}") from exc

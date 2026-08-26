@@ -61,7 +61,7 @@ class LegacyReadOnlyCompatibility:
     def _connection(self) -> sqlite3.Connection:
         try:
             connection = sqlite3.connect(
-                f"file:{self.path.as_posix()}?mode=ro", uri=True, timeout=5
+                f"file:{self.path.as_posix()}?mode=ro&immutable=1", uri=True, timeout=5
             )
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA busy_timeout=5000")

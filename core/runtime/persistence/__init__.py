@@ -1,6 +1,11 @@
 """Application-facing persistence boundary for the V5 runtime."""
 
-from .factory import RuntimeModeError, create_runtime_persistence, resolve_runtime_mode
+from .factory import (
+    RuntimeModeError,
+    create_runtime_persistence,
+    resolve_runtime_mode,
+    shutdown_runtime_persistence,
+)
 from .facade import RuntimePersistence, RuntimePersistenceError
 
 __all__ = [
@@ -9,4 +14,5 @@ __all__ = [
     "RuntimePersistenceError",
     "create_runtime_persistence",
     "resolve_runtime_mode",
+    "shutdown_runtime_persistence",
 ]

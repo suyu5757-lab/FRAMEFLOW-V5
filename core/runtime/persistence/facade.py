@@ -13,7 +13,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
+from sqlalchemy import delete
+
 from core.migration.legacy_compat import LegacyReadOnlyCompatibility, LegacyReadOnlyError
+from core.schemas.runtime_mvp import metadata
 from core.runtime.state_store import StateStore
 
 
@@ -82,7 +85,18 @@ class RuntimePersistence:
         return self.store.path
 
     def close(self) -> None:
-        self.store.close()
+        self.dispose()
+
+    def dispose(self) -> None:
+        """Release the StateStore and its SQLAlchemy pool explicitly."""
+
+        self.store.dispose()
+
+    def __enter__(self) -> "RuntimePersistence":
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc_value: Any, _traceback: Any) -> None:
+        self.dispose()
 
     @staticmethod
     def encode(value: Any) -> str:
@@ -344,6 +358,24 @@ class RuntimePersistence:
         )
         envelope["document"]["sortOrder"] = changes.get("sortOrder", envelope["document"].get("sortOrder", 0))
         return {"ok": True, **envelope}
+
+    def delete_smoke_fixture(self, project_id: str) -> None:
+        """Remove only an explicitly named T03-R3 validation project.
+
+        Production cleanup remains inside the same V5 transaction boundary as
+        normal application persistence.  The prefix guard prevents this
+        helper from becoming a general project deletion API.
+        """
+
+        if not project_id.startswith(("T03R3_SMOKE_", "T03R3B_SMOKE_", "T03R3C_SMOKE_")):
+            raise RuntimePersistenceError("only T03R3*SMOKE_ fixtures may be cleaned up")
+        with self.store.transaction() as connection:
+            events = metadata.tables["events"]
+            sequences = metadata.tables["sequences"]
+            projects = metadata.tables["projects"]
+            connection.execute(delete(events).where(events.c.entity_id.in_((project_id, f"{project_id}:SQ001"))))
+            connection.execute(delete(sequences).where(sequences.c.project_id == project_id))
+            connection.execute(delete(projects).where(projects.c.id == project_id))
 
     def health_payload(self) -> dict[str, Any]:
         capabilities = {

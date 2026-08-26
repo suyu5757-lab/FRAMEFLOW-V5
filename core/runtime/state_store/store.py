@@ -66,6 +66,7 @@ class StateStore:
         raw_path = path if path is not None else DEFAULT_DATABASE_PATH
         self.path = raw_path if str(raw_path) == ":memory:" else Path(raw_path).resolve(strict=False)
         self.database_url = _database_url(raw_path)
+        self._closed = False
         self.engine = create_engine(
             self.database_url,
             echo=echo,
@@ -112,6 +113,8 @@ class StateStore:
     def connection(self) -> Iterator[Connection]:
         """Borrow a pooled connection and always return it to the engine."""
 
+        if self._closed:
+            raise RuntimeError("StateStore is closed")
         connection = self.engine.connect()
         try:
             yield connection
@@ -122,11 +125,21 @@ class StateStore:
     def transaction(self) -> Iterator[Connection]:
         """Run a caller-supplied operation inside one explicit transaction."""
 
+        if self._closed:
+            raise RuntimeError("StateStore is closed")
         with self.engine.begin() as connection:
             yield connection
 
     def close(self) -> None:
-        self.engine.dispose()
+        self.dispose()
+
+    def dispose(self) -> None:
+        """Close pooled DBAPI connections deterministically and idempotently."""
+
+        if self._closed:
+            return
+        self.engine.dispose(close=True)
+        self._closed = True
 
     def __enter__(self) -> "StateStore":
         return self

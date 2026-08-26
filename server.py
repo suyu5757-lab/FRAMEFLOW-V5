@@ -203,7 +203,7 @@ async def lifespan(application:FastAPI):
         try:
             yield
         finally:
-            runtime.close()
+            runtime.dispose()
         return
     application.state.runtime_mode = "legacy"
     if Path(DB_PATH).resolve() != (DEFAULT_DATA_DIR / "frameflow.db").resolve():

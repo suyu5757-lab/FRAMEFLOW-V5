@@ -32,7 +32,13 @@ def resolve_v5_database_path(environment: Mapping[str, str] | None = None) -> Pa
             "it never defaults to data/frameflow.db"
         )
     path = Path(raw).expanduser().resolve(strict=False)
-    if path == CANONICAL_DATABASE_PATH:
+    production_enabled = str(values.get("FRAMEFLOW_V5_PRODUCTION") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if path == CANONICAL_DATABASE_PATH and not production_enabled:
         raise RuntimeModeError(
             "pre-cutover V5 mode refuses the canonical production database path"
         )
@@ -48,8 +54,21 @@ def create_runtime_persistence(
         raise RuntimeModeError("RuntimePersistence is only created for FRAMEFLOW_RUNTIME_MODE=v5")
     database_path = resolve_v5_database_path(values)
     legacy_path = str(values.get("FRAMEFLOW_LEGACY_READONLY_DB") or "").strip()
-    store = open_runtime_store(database_path, candidate=True)
+    production_enabled = str(values.get("FRAMEFLOW_V5_PRODUCTION") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    store = open_runtime_store(database_path, candidate=not production_enabled)
     return RuntimePersistence(store, legacy_path=Path(legacy_path) if legacy_path else None)
+
+
+def shutdown_runtime_persistence(persistence: RuntimePersistence | None) -> None:
+    """Explicitly release an application persistence instance, if present."""
+
+    if persistence is not None:
+        persistence.dispose()
 
 
 __all__ = [
@@ -57,4 +76,5 @@ __all__ = [
     "create_runtime_persistence",
     "resolve_runtime_mode",
     "resolve_v5_database_path",
+    "shutdown_runtime_persistence",
 ]
