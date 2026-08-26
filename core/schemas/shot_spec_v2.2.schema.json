@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frameflow.local/schema/shot-spec-v2.2.schema.json",
+  "title": "FRAMEFLOW ShotSpec v2.2",
+  "description": "Provider-neutral, shot-centric production contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "shot_id",
+    "sequence_id",
+    "duration_sec",
+    "story_purpose",
+    "characters",
+    "scene",
+    "props",
+    "subject_action",
+    "camera",
+    "start_state",
+    "end_state",
+    "dialogue",
+    "first_frame_artifact_id",
+    "last_frame_artifact_id",
+    "must_keep",
+    "must_avoid",
+    "status"
+  ],
+  "properties": {
+    "shot_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sequence_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "duration_sec": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "story_purpose": {
+      "type": "string"
+    },
+    "characters": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "scene": {
+      "type": "string",
+      "minLength": 1
+    },
+    "props": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "subject_action": {
+      "type": "string"
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "size",
+        "height",
+        "angle",
+        "motion",
+        "lens_intent",
+        "composition"
+      ],
+      "properties": {
+        "size": {
+          "type": ["string", "null"],
+          "default": null
+        },
+        "height": {
+          "type": ["string", "null"],
+          "default": null
+        },
+        "angle": {
+          "type": ["string", "null"],
+          "default": null
+        },
+        "motion": {
+          "type": ["string", "null"],
+          "default": null
+        },
+        "lens_intent": {
+          "type": ["string", "null"],
+          "default": null
+        },
+        "composition": {
+          "type": ["string", "null"],
+          "default": null
+        }
+      }
+    },
+    "start_state": {
+      "type": "object"
+    },
+    "end_state": {
+      "type": "object"
+    },
+    "dialogue": {
+      "type": "string"
+    },
+    "first_frame_artifact_id": {
+      "type": ["string", "null"]
+    },
+    "last_frame_artifact_id": {
+      "type": ["string", "null"]
+    },
+    "must_keep": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "must_avoid": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "DRAFT",
+        "SPEC_READY",
+        "ASSET_READY",
+        "PACKAGE_READY",
+        "SUBMITTED",
+        "GENERATING",
+        "RESULT_READY",
+        "QA_APPROVED",
+        "RETRY_REQUIRED",
+        "DELIVERED"
+      ],
+      "default": "DRAFT"
+    },
+    "expression": {
+      "type": ["string", "null"],
+      "default": null
+    },
+    "performance_intent": {
+      "type": ["string", "null"],
+      "default": null
+    },
+    "lighting": {
+      "type": ["string", "object", "null"],
+      "default": null
+    },
+    "weather": {
+      "type": ["string", "null"],
+      "default": null
+    },
+    "time_of_day": {
+      "type": ["string", "null"],
+      "default": null
+    },
+    "visual_style": {
+      "type": ["string", "object", "null"],
+      "default": null
+    },
+    "audio_cues": {
+      "type": ["string", "array", "object", "null"],
+      "default": null
+    },
+    "quality_priority": {
+      "type": ["string", "number", "null"],
+      "default": null
+    },
+    "cost_priority": {
+      "type": ["string", "number", "null"],
+      "default": null
+    },
+    "continuity_state_in": {
+      "type": ["object", "null"],
+      "default": null
+    },
+    "continuity_state_out": {
+      "type": ["object", "null"],
+      "default": null
+    },
+    "provider_preferences": {
+      "type": ["object", "array", "string", "null"],
+      "default": null
+    },
+    "reference_assets": {
+      "type": ["array", "null"],
+      "default": null
+    },
+    "motion_reference_artifact_id": {
+      "type": ["string", "null"],
+      "default": null
+    }
+  }
+}
