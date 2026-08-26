@@ -110,3 +110,93 @@ The status list above is the pre-document snapshot. The four T00 documents are t
 ## T00 conclusion
 
 The audit can establish the current branch, remotes, baseline hash, dirty-tree condition, and absence of an in-scope sync script. It cannot establish Gate 0 because the actual sync mechanism, stable tag, development branch, compatibility skeleton, and rollback behavior still require the separately authorized T01.5 procedure.
+
+## T01.5 Gate 0 deep audit (appended; T00 snapshot above is unchanged)
+
+### Step 1 — Baseline recheck
+
+The T00 freeze was rechecked before any T01.5 write:
+
+- `main` HEAD: `7e405b4cfa8f8e91ed58863e1114c6bfcf7b6641`.
+- Existing T00 commit: `docs: freeze FRAMEFLOW V5.3.2 final architecture`.
+- Remotes: `origin` and `local-source` as recorded above.
+- The working tree remains dirty with the pre-existing M/D/?? set recorded in the T00 section; T01.5 did not sweep it into a commit.
+- The configured `local-source` desktop path is absent, so it is not treated as a writable source.
+
+### Step 2 — Stable Tag
+
+Created locally, without push:
+
+```text
+v5.3.2-gate0-baseline
+```
+
+It is an annotated tag. `git rev-list -n 1 v5.3.2-gate0-baseline` returned:
+
+```text
+7e405b4cfa8f8e91ed58863e1114c6bfcf7b6641
+```
+
+No tag was force-updated.
+
+### Step 3 — Development branch
+
+Created and validated locally:
+
+```text
+dev/v5.3.2
+```
+
+Before T01.5 document work, both `dev/v5.3.2` and `main` resolved to `7e405b4cfa8f8e91ed58863e1114c6bfcf7b6641`. The worktree was returned to `main` for the external audit, then T01.5 documents were authored on `dev/v5.3.2`; `main` remains the frozen baseline.
+
+### Step 4 — Expanded synchronization audit
+
+#### Windows tasks and startup
+
+The elevated read-only `schtasks.exe /query /fo LIST /v` audit parsed 276 task records. The only FRAMEFLOW-related tasks were:
+
+| Task | Trigger | Action | Sync finding |
+|---|---|---|---|
+| `\FRAMEFLOW OpenCode Agent Runtime` | At logon | External `D:\11067\Codex\2026-08-13\video-2\runtime\opencode-runtime.cmd` | Starts OpenCode on loopback; no Git |
+| `\FRAMEFLOW OpenCode Runtime Shutdown` | System shutdown event | External `stop-opencode-runtime.ps1` | Stops OpenCode; no Git |
+| `\FRAMEFLOW-V3-Service` | At logon | Project `.venv\Scripts\python.exe -m uvicorn server:app` | Starts V3 service; no Git |
+
+The desktop source `C:\Users\11067\Desktop\video 工作台制作` does not exist. Both Startup folders contain only `desktop.ini`. Run registry inspection found no FRAMEFLOW or Git synchronization entry. The only desktop script launcher found was `启动 DeepSeek Harness.cmd`; it contains no Git command.
+
+#### External scripts and repositories
+
+The external runtime directory exists at `D:\11067\Codex\2026-08-13\video-2\runtime`. Its launcher, shutdown script, registration script, and README describe OpenCode runtime lifecycle only. A read-only scan found no Git command. The external repository itself is a separate dirty `main` worktree with the same `origin`/`local-source` configuration and no Git command in 94 scanned executable/config files. It was not modified.
+
+#### Full command scan
+
+The expanded executable/config scan covered 132 files across the project, Skill repository, historical tree, and external runtime; it found **0** Git command matches. The external FRAMEFLOW repository scan covered 94 files; it found **0** matches. A separate project documentation scan found 32 Git policy/instruction mentions. Those mentions are non-executable documentation, including the T00 policy, this audit, and the user-provided T01.5 instruction file; they are not synchronization mechanisms.
+
+#### Three-color validation
+
+The T00 SAFE / REVIEW / FORBIDDEN table remains the policy authority. T01.5 validated it against the expanded scan:
+
+- SAFE inspection commands were used only for read-only observation.
+- REVIEW commands were limited to the explicitly requested Tag, branch, staging, commit, and branch-switch operations; no pull, merge, or push was used.
+- No FORBIDDEN command was executed. In particular, no `reset --hard`, `clean -fd`, `checkout .`, `restore .`, force push, automatic main merge, or automatic sync branch switch occurred.
+- Dirty-tree abort behavior is now codified in `MIGRATION_SAFETY.md`; unattended synchronization must abort rather than repair or sweep the existing dirty tree.
+
+#### Path safety
+
+The canonical path check for `D:\AIGC\SUYU` inspected `D:\`, `D:\AIGC`, and `D:\AIGC\SUYU`. All resolved to their requested physical paths and none had the ReparsePoint attribute. The historical tree and `D:\ComfyUI` were read-only audit targets; neither received a write. The existing `data\frameflow.db` was not created, migrated, or schema-modified.
+
+### Step 5 — Migration safety skeleton
+
+Added on `dev/v5.3.2`:
+
+- `docs/MIGRATION_SAFETY.md` — classification, BREAKING requirements, branch policy, dirty-tree abort rules, and rollback runbook.
+- `docs/GATE0_CHECKLIST.md` — auditable Gate 0 exit checklist.
+
+The other three T00 documents are unchanged. This audit file is the only T00 document updated, by this appended T01.5 section.
+
+### Step 6 — Rollback verification
+
+A disposable branch `codex/t01.5-rollback-probe` was created from `dev/v5.3.2`. It added only `docs/.t01.5-rollback-probe.md` in commit `91fb0c3fc564f2f4f67989c3cda2c61347a802bf`. `git revert --no-edit HEAD` produced `56c518b600ac99f743b0aebccb207a4541d9d9b5`, removed the probe file, and left the disposable branch tree equal to `dev/v5.3.2`. During verification, `main`, `dev/v5.3.2`, and `v5.3.2-gate0-baseline` all resolved to `7e405b4cfa8f8e91ed58863e1114c6bfcf7b6641`. The disposable probe branch was then deleted. No formal branch, stable Tag, or existing user change was altered.
+
+### Step 7 — Gate 0 conclusion
+
+**Gate 0 — MIGRATION SAFE: PASS.** The stable Tag, development branch, expanded sync audit, three-color policy, dirty-tree abort policy, migration safety skeleton, and real rollback evidence are present. No T02 or feature work is authorized by this result; the next task must still be explicitly issued.
