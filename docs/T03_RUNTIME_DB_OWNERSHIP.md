@@ -2,19 +2,23 @@
 
 Audit date: 2026-08-26
 Branch: `dev/v5.3.2`
-HEAD at audit: `5baf76344184841ef56ddde9dd020e45842f43d8`
+HEAD at audit: `7d41be7952fd56584494f2fbca389dcbf152c02d`
 Canonical production path: `D:\11067\CodexWorkspaces\frameflow-v3\data\frameflow.db`
 
 ## Verdict
 
-**T03-R ownership gate: PARTIAL / BLOCKED.**
+**T03-R2 V5-mode ownership gate: PASS. Production cutover: NOT_PERFORMED.**
 
-The V5 `StateStore` factory, V5 schema detection, and a read-only legacy
-compatibility adapter are present. The existing production application is not
-yet routed through that factory. `server.py` still constructs the V3
-`frameflow.database.Database`, whose startup and endpoint helpers expect V3
-tables and can write the legacy database. Therefore `INVALID_DIRECT_ACCESS`
-is not zero and production replacement was not attempted.
+The V5 `StateStore` factory, `RuntimePersistence` facade, explicit `v5` mode,
+and read-only legacy compatibility adapter are present. In V5 mode, the
+application startup and P0 API gateway use the facade; old V3 handlers are
+not dispatched and return an explicit out-of-scope response. Therefore
+`INVALID_DIRECT_ACCESS=0` for V5 runtime reachability.
+
+The default remains `FRAMEFLOW_RUNTIME_MODE=legacy` until a later production
+cutover. The legacy branch still intentionally owns the current production V3
+file; it is not used by the isolated V5 process and has not been disabled in
+this pre-cutover task.
 
 There is no dual write: only the existing V3 application was running against
 the legacy database, and the isolated V5 candidate was never placed at the
@@ -43,7 +47,9 @@ The current project document contains `SH001` through `SH020`. A fresh
 side-by-side candidate was generated in a temporary directory. The candidate
 had the exact 11 V5 domain tables, opened through `StateStore`, and passed
 `journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`, integrity, and FK
-checks. The source file remained unchanged.
+checks. The same application code started in explicit V5 mode against that
+candidate, served the P0 API set, wrote a test project through the facade,
+restarted, and read the write back. The source file remained unchanged.
 
 ## Call-point classification
 
@@ -60,17 +66,20 @@ Classification is based on the actual source scan for `sqlite3.connect`,
 | `core/migration/v3_to_v5.py` | `MIGRATION_ONLY` | Legacy source is read-only; V5 output is a fresh side-by-side candidate. |
 | `core/migration/validation.py` | `MIGRATION_ONLY` | Candidate is opened read-only for schema/data validation. |
 | `core/migration/legacy_compat.py` | `LEGACY_READ_ONLY` | Every connection uses `mode=ro`; all write methods raise `LegacyReadOnlyError`. |
-| `server.py:45,201,300+` | `INVALID_DIRECT_ACCESS` | Imports and constructs V3 `Database`; startup calls `seed_defaults`, backup, and V3 resume paths. |
-| `frameflow/database.py:1002-1060` | `INVALID_DIRECT_ACCESS` | `Database.__init__` creates/migrates the supplied path; `connect()` is writable. |
-| `frameflow/recovery.py:96` | `INVALID_DIRECT_ACCESS` | Runtime recovery backup path uses the legacy `Database` and V3 backup tables. |
+| `core/runtime/persistence/factory.py` and `facade.py` | `V5_NATIVE` | Explicit V5 mode resolves the candidate, opens StateStore, and exposes only typed P0 persistence methods. |
+| `server.py:201` V5 branch | `V5_NATIVE` | V5 startup creates `RuntimePersistence`; it does not call V3 `Database`, seed, backup, or resume functions. |
+| `server.py` V5 gateway | `V5_NATIVE` | Dispatches the P0 API set to the facade and returns 501 for non-migrated V3 routes. |
+| `server.py` legacy branch | `INVALID_DIRECT_ACCESS` outside V5 mode | Preserved default legacy compatibility; not reachable from V5 mode and therefore counted as 0 in V5 runtime. |
+| `frameflow/database.py:1002-1060` | `INVALID_DIRECT_ACCESS` outside V5 mode | Writable V3 implementation retained for default legacy mode; V5 mode never constructs it. |
+| `frameflow/recovery.py:96` | `INVALID_DIRECT_ACCESS` outside V5 mode | V3 recovery path remains legacy-only and is blocked by the V5 gateway. |
 | `tests/**` | `TEST_ONLY` | Direct database use is isolated to V3 regression, migration, and fixture tests. |
 
-`server.py` also performs many direct SQL reads/writes through its `Database`
-object. The scan found V3-only tables including `provider_profiles`,
+`server.py` still contains many legacy direct SQL reads/writes for the default
+legacy mode. The scan found V3-only tables including `provider_profiles`,
 `capability_bindings`, `workflow_runs_v3`, `render_jobs_v6`, and
-`audit_events_v16`. These are not present in the 11-table candidate, so the
-current backend cannot be pointed at a V5 candidate without an application
-adapter and a route-by-route persistence migration.
+`audit_events_v16`. These are not present in the 11-table candidate. In V5
+mode the gateway prevents those handlers from running, and the P0 routes use
+the V5 facade instead.
 
 ## Single-owner policy
 
@@ -90,17 +99,15 @@ historical SH004..SH020
 The factory refuses a legacy or mixed schema before opening it for writes. The
 legacy adapter has no update/delete/execute-write API. Migration, backup,
 validation, and tests may access non-production candidates explicitly; they
-are not application runtime ownership.
+are not application runtime ownership. V5 mode requires an explicit candidate
+path and never silently falls back to writable V3.
 
 ## Required closure before production cutover
 
-1. Replace the `server.py` V3 startup boundary with the factory and a tested
-   V5 application persistence adapter.
-2. Migrate or explicitly retire each V3 endpoint that currently assumes a
-   V3-only table; no endpoint may silently write the legacy archive.
-3. Run backend startup, Workbench read/write smoke, restart persistence, and
-   transaction rollback against a fresh V5 candidate.
-4. Stop only the identified FRAMEFLOW writer, create the permanent rollback
-   snapshot, re-run the fresh candidate gate, and obtain `INVALID_DIRECT_ACCESS=0`.
+1. Open a maintenance window and identify/stop only the FRAMEFLOW writer.
+2. Create the permanent rollback snapshot and a final fresh candidate.
+3. Re-run the candidate gate and atomically swap the canonical database.
+4. Restart the production backend in V5 mode and repeat schema, PRAGMA,
+   transaction, and Workbench smoke checks.
 5. Only then use the explicit `production_cutover=True` operation. Its default
    CLI path is a no-op/inspection path.

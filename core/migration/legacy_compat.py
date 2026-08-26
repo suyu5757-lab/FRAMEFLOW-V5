@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from copy import deepcopy
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -68,6 +69,16 @@ class LegacyReadOnlyCompatibility:
             return connection
         except sqlite3.DatabaseError as exc:
             raise LegacyReadOnlyError(f"legacy archive is not readable: {self.path}") from exc
+
+    @contextmanager
+    def connection(self):
+        """Yield one read-only SQLite connection for compatibility probes."""
+
+        connection = self._connection()
+        try:
+            yield connection
+        finally:
+            connection.close()
 
     def list_shots(self) -> list[dict[str, Any]]:
         connection = self._connection()
