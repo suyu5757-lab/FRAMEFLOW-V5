@@ -1,13 +1,19 @@
 # FRAMEFLOW V5.3.2 — T03-R Runtime DB Ownership Audit
 
-Audit date: 2026-08-26
+Audit date: 2026-08-27
 Branch: `dev/v5.3.2`
-HEAD at audit: `7d41be7952fd56584494f2fbca389dcbf152c02d`
+HEAD at audit: `46cba108d0ce54eebc4d95ae5309e95900c275bd`
 Canonical production path: `D:\11067\CodexWorkspaces\frameflow-v3\data\frameflow.db`
 
 ## Verdict
 
-**T03-R2 V5-mode ownership gate: PASS. Production cutover: NOT_PERFORMED.**
+**T03-R3E final cutover: ROLLED_BACK. Current runtime source of truth: LEGACY_V3.**
+
+The one authorized R3E atomic replacement completed, but the post-cutover
+legacy compatibility gate failed because the V5 production process was started
+without `FRAMEFLOW_LEGACY_READONLY_DB`. The V5 database was preserved for
+diagnosis, the permanent Legacy archive remains in place, and the canonical
+path was atomically restored from that archive. No second cutover was attempted.
 
 The V5 `StateStore` factory, `RuntimePersistence` facade, explicit `v5` mode,
 and read-only legacy compatibility adapter are present. In V5 mode, the
@@ -15,15 +21,26 @@ application startup and P0 API gateway use the facade; old V3 handlers are
 not dispatched and return an explicit out-of-scope response. Therefore
 `INVALID_DIRECT_ACCESS=0` for V5 runtime reachability.
 
-The default remains `FRAMEFLOW_RUNTIME_MODE=legacy` until a later production
-cutover. The legacy branch still intentionally owns the current production V3
-file; it is not used by the isolated V5 process and has not been disabled in
-this pre-cutover task.
+The current production runtime is again `FRAMEFLOW_RUNTIME_MODE=legacy`; the
+legacy branch owns the canonical V3 file after rollback. The V5 branch is not
+the active production runtime, and the Legacy writable runtime has not been
+disabled because the R3E cutover did not pass its post-cutover gates.
 
-There is no dual write: only the existing V3 application was running against
-the legacy database, and the isolated V5 candidate was never placed at the
-canonical path. There is also no dual source of truth because no cutover took
-place; the current source of truth remains V3.
+There is no dual write or dual source of truth after rollback: the Legacy V3
+runtime is the sole active writable source, while the archived Legacy snapshot
+is read-only. The failed V5 production database is preserved outside the
+active runtime for diagnosis only.
+
+## R3E rollback evidence
+
+The complete attempt and gate results are recorded in
+`docs/T03_R3E_FINAL_PRODUCTION_CUTOVER_REPORT.md`. The permanent archive is:
+
+`D:\11067\CodexWorkspaces\frameflow-v3\archives\migrations\v5.3.2\T03R3E-20260827T073218Z-1d10d139`
+
+It contains the five required archive files. The current canonical database is
+Legacy V3 again; production V5 ownership is **not active** until a separately
+authorized future cutover.
 
 ## Source facts
 
