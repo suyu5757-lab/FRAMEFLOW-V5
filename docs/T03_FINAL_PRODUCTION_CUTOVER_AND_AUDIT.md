@@ -6,6 +6,189 @@ Branch: `dev/v5.3.2`
 
 HEAD before attempt: `e213121feb9ed76bc23433fd85e064445b1938d9`
 
+## Final authorized production swap — rolled back (2026-08-27)
+
+The one authorized production replacement was executed from blocker-repair
+HEAD `5269824f9e2a830d84094b3779fdb51a741b1159`. All formal environment,
+43-test safety regression, permanent archive, Candidate A, Candidate B, and
+A0/B0 deterministic equivalence gates passed before the replacement.
+
+Run ID:
+
+`T03FINAL-20260827T135157Z-a483f658`
+
+```text
+FINAL_LEGACY_SHA = 38c4342bae668e5d6198602059c83bb261b6206a7de04e17e20cf11838ca30d8
+Permanent archive = 5/5, READ_ONLY
+Migration implementation = v3_to_v5:20260826_01-deterministic-v2
+A0 logical SHA = f469daa1b2746c3fe259e964d009e37070e277972fc6bd7d21a23229441acf59
+A1 logical SHA = f469daa1b2746c3fe259e964d009e37070e277972fc6bd7d21a23229441acf59
+B0 logical SHA = f469daa1b2746c3fe259e964d009e37070e277972fc6bd7d21a23229441acf59
+Candidate A first/restart = 19/19 + 17/17 twice
+Candidate B backend-opened = NO
+Candidate B validation/rename = PASS/PASS
+UNKNOWN = 0
+UNACCOUNTED = 0
+Atomic replacement = PASS (one attempt)
+```
+
+The preflight command `Get-NetTCPConnection -ErrorAction SilentlyContinue`
+returned no listener, but this was a false negative caused by process visibility
+permissions. After replacement, the formal V5 launcher exited with WinError
+10048 because port 8787 was already held. `netstat -ano` then proved that
+long-lived Python PID 39204, created at 20:04:55, was listening on
+127.0.0.1:8787. The attempted V5 process never owned production traffic.
+
+The hard rollback rule was applied immediately. The failed V5 canonical DB and
+its startup config were preserved under this run's `data/.cutover` directory.
+The same run's read-only Legacy archive was copied through the tested SQLite
+backup mechanism to a same-volume rollback candidate and atomically restored.
+The V5 startup config was removed. No second cutover was attempted.
+
+Independent rollback audit:
+
+```text
+Production schema = LEGACY_V3
+Production tables = 41
+Schema version = 16
+Integrity = ok
+Foreign-key violations = 0
+Live health = HTTP 200, version 3.0.0, ready=true
+Live listener = PID 39204
+data/runtime-startup.json = absent
+Failed V5 DB preserved = YES
+Archive = 5/5 READ_ONLY
+V3 regression = 37 passed
+Dual write = NO
+Dual source of truth = NO
+Rollback verification = PASS
+Second production swap = NO
+```
+
+Final result for this authorized run:
+
+```text
+PRODUCTION CUTOVER = ROLLED_BACK
+RUNTIME SOURCE OF TRUTH = LEGACY_V3
+T03 FINAL STATUS = FAIL
+READY FOR T00-T03 FINAL RE-AUDIT = NO
+```
+
+The failure is an operational listener-ownership preflight defect, not a
+Candidate migration/equivalence regression. Per authorization, this run is
+closed and cannot retry the production swap.
+
+### Port ownership remediation closure
+
+The conflict was subsequently closed without another production replacement.
+PID 39204 was positively identified as the formal Legacy Uvicorn worker started
+by `FRAMEFLOW-V3-Service`, itself invoked by the logon `FRAMEFLOW Runtime
+Startup` task. The cutover had never stopped it: a permission-sensitive
+`Get-NetTCPConnection -ErrorAction SilentlyContinue` query returned a false
+empty result.
+
+The repaired lifecycle uses netstat PID ownership, FRAMEFLOW doctor identity,
+an elevated exact-PID controller, a TTL maintenance token, temporary disabling
+of both exact tasks, repeated FREE observations, and two live pre-swap probes.
+Foreign and unknown owners fail closed. Real Windows integration stopped the
+formal Legacy owner, proved no respawn and blocked both task/stack starts, then
+restored the original task states and healthy Legacy runtime under a new PID.
+
+```text
+Port ownership closure = PASS
+Relevant tests = 92 passed, 0 failed, 0 blocked
+Production DB replacement during closure = NO
+Atomic replacement during closure = NOT_PERFORMED
+Runtime source of truth = LEGACY_V3
+READY FOR FINAL PRODUCTION CUTOVER = YES
+```
+
+Full evidence is in `docs/T03_PRODUCTION_PORT_OWNERSHIP_CLOSURE.md`. A future
+cutover must create a new final archive and use a new elevated maintenance
+state; the rolled-back run remains historical evidence only.
+
+## Final Cutover Retry — pre-swap abort (2026-08-27)
+
+The separately authorized Final Production Cutover Retry was stopped during
+preflight, before the production service was stopped and before any archive,
+candidate, startup configuration, or atomic replacement was created.
+
+```text
+HEAD before retry = 8612bd05b394b0d8ecc3a12ee482a521e92628d6
+Formal interpreter = D:\11067\CodexWorkspaces\frameflow-v3\.venv\Scripts\python.exe
+Formal environment gate = PASS
+Production cutover = NOT_PERFORMED
+Runtime source of truth = LEGACY_V3
+Rollback triggered = NO
+```
+
+The retry instructions require the exact formal launcher probe to use an
+independent Smoke Candidate A and prohibit the backend from ever opening the
+final swap Candidate B. The current mandatory cutover implementation requires
+the formal-launcher evidence to name the exact final candidate path and also
+requires the evidence's persisted runtime configuration to point to that same
+candidate:
+
+```text
+core/migration/production_environment.py:181
+  formal launcher evidence candidate mismatch
+
+core/migration/production_environment.py:200
+  formal launcher runtime config candidate mismatch
+
+core/migration/cutover.py:348-353
+  perform_production_cutover verifies that evidence against the swap candidate
+```
+
+A controlled preflight invocation using Candidate A evidence and Candidate B
+as the intended target returned:
+
+```text
+ProductionEnvironmentError: formal launcher evidence candidate mismatch
+```
+
+Passing the gate would therefore require either opening Candidate B with the
+backend, changing the production gate during this no-development retry, or
+rewriting evidence so it no longer described the probe that actually ran.
+All three are prohibited. This is a concrete cutover-contract blocker, not a
+runtime-environment regression. The required `ABORT BEFORE SWAP` rule was
+applied without attempting a second path.
+
+Preflight and independent audit evidence:
+
+```text
+Formal sys.executable resolved = D:\11067\CodexWorkspaces\frameflow-v3\.venv\Scripts\python.exe
+sys.prefix resolved = D:\11067\CodexWorkspaces\frameflow-v3\.venv
+sys.base_prefix = C:\Users\11067\AppData\Local\Programs\Python\Python314
+Python = 3.14.6
+jsonschema / SQLAlchemy / Alembic / server-runtime imports = PASS
+pip check = PASS
+requirements dry-run consistency = PASS
+Environment tests = 10 passed, 0 failed
+Combined relevant regression = 119 passed, 0 failed, 0 blocked
+8787 listener retained = PID 33880
+Live health = HTTP 200, runtime_mode legacy, schema_version 16
+Canonical schema = LEGACY_V3, 41 tables
+Canonical SHA at final audit = 917ecbc9d120b419555a63a6a273a352eede45b6ab04b8b9ea91eb8a41631986
+Canonical integrity = ok
+Canonical FK violations = 0
+data/runtime-startup.json = absent
+Production DB staged = NO
+Archive staged = NO
+```
+
+Current retry verdict:
+
+```text
+T03 FINAL STATUS = FAIL
+PRODUCTION CUTOVER = NOT_PERFORMED
+RUNTIME SOURCE OF TRUTH = LEGACY_V3
+READY FOR T00-T03 FINAL RE-AUDIT = NO
+```
+
+The remainder of this document preserves the prior rolled-back cutover attempt
+as historical evidence.
+
 ## Final verdict
 
 ```text

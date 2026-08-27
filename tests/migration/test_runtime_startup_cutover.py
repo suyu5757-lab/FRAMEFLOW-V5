@@ -19,6 +19,24 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_DATABASE = PROJECT_ROOT / "data" / "frameflow.db"
 
 
+def _port_evidence() -> dict[str, object]:
+    free = {"classification": "FREE", "owner_pid": None}
+    return {
+        "passed": True,
+        "errors": [],
+        "observations": [dict(free), dict(free), dict(free)],
+        "maintenance_paused": True,
+        "maintenance_tasks": {
+            "FRAMEFLOW Runtime Startup": "Disabled",
+            "FRAMEFLOW-V3-Service": "Disabled",
+        },
+    }
+
+
+def _free_port() -> dict[str, object]:
+    return {"classification": "FREE", "owner_pid": None}
+
+
 def _formal_evidence(candidate: Path, archive: Path) -> dict[str, object]:
     def boot(name: str) -> dict[str, object]:
         return {
@@ -87,6 +105,8 @@ def test_authorized_cutover_persists_explicit_restart_safe_v5_configuration() ->
             runtime_config_path=config_path,
             cutover_run_id="cutover-config-test",
             formal_launcher_evidence=_formal_evidence(candidate, archive),
+            port_ownership_evidence=_port_evidence(),
+            port_ownership_probe=_free_port,
         )
 
     config = RuntimeStartupConfig.read(config_path)
@@ -133,6 +153,8 @@ def test_failed_replacement_restores_the_prior_runtime_configuration() -> None:
                 runtime_config_path=config_path,
                 cutover_run_id="failed-cutover-config-test",
                 formal_launcher_evidence=_formal_evidence(candidate, archive),
+                port_ownership_evidence=_port_evidence(),
+                port_ownership_probe=_free_port,
             )
 
     restored = RuntimeStartupConfig.read(config_path)

@@ -18,7 +18,7 @@ import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from core.runtime.state_store.factory import (
@@ -50,6 +50,11 @@ from .equivalence import (
     verify_final_candidate_gate,
 )
 from .legacy_compat import account_legacy_shots, inspect_legacy_archive
+from .port_ownership import (
+    PortOwnershipError,
+    assert_exclusive_port_evidence,
+    assert_live_port_free,
+)
 from .v3_to_v5 import migrate_v3_to_v5
 from .validation import validate_candidate
 
@@ -374,6 +379,8 @@ def perform_production_cutover(
     runtime_config_path: Path | str = DEFAULT_RUNTIME_CONFIG_PATH,
     cutover_run_id: str | None = None,
     formal_launcher_evidence: dict[str, Any] | None = None,
+    port_ownership_evidence: Mapping[str, Any] | None = None,
+    port_ownership_probe: Callable[[], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Atomically place a verified candidate, only with explicit authorization.
 
@@ -437,6 +444,14 @@ def perform_production_cutover(
         )
     except ProductionEnvironmentError as exc:
         raise CutoverBlocked(f"formal launcher pre-swap gate failed: {exc}") from exc
+    try:
+        assert_exclusive_port_evidence(port_ownership_evidence)
+        if port_ownership_probe is None:
+            raise PortOwnershipError("a live production port probe is required")
+        initial_port_observation = dict(port_ownership_probe())
+        assert_live_port_free(initial_port_observation)
+    except PortOwnershipError as exc:
+        raise CutoverBlocked(f"exclusive production port gate failed: {exc}") from exc
     if not candidate_handle_free:
         raise CutoverBlocked("candidate handle-free rename proof is required before production replacement")
     archive_precreated = archive_path.exists()
@@ -454,6 +469,13 @@ def perform_production_cutover(
         raise CutoverBlocked(f"legacy archive validation failed: {exc}") from exc
     if no_active_writer is None or not no_active_writer():
         raise CutoverBlocked("no_active_writer proof is required before production replacement")
+    try:
+        immediate_port_observation = dict(port_ownership_probe())
+        assert_live_port_free(immediate_port_observation)
+    except PortOwnershipError as exc:
+        raise CutoverBlocked(
+            f"production port changed before atomic replacement: {exc}"
+        ) from exc
     if not candidate_path.is_file():
         raise CutoverBlocked(f"candidate does not exist: {candidate_path}")
     sidecars = (Path(f"{source_path}-wal"), Path(f"{source_path}-shm"))
@@ -518,6 +540,11 @@ def perform_production_cutover(
         "legacy_archive_validation": legacy_validation,
         "runtime_config": str(config_path),
         "runtime_config_payload": json.loads(v5_config.as_json()),
+        "port_ownership": {
+            "maintenance_evidence": dict(port_ownership_evidence),
+            "initial_live": initial_port_observation,
+            "immediate_pre_swap": immediate_port_observation,
+        },
     }
 
 
