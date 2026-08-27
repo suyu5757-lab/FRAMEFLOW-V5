@@ -31,6 +31,11 @@ from core.runtime.persistence.startup_config import (
     RuntimeStartupConfigError,
     write_runtime_startup_config,
 )
+from core.migration.production_environment import (
+    ProductionEnvironmentError,
+    verify_formal_launcher_evidence,
+    verify_production_interpreter,
+)
 
 from .backup import create_backup, write_manifest
 from .legacy_compat import account_legacy_shots, inspect_legacy_archive
@@ -313,6 +318,7 @@ def perform_production_cutover(
     legacy_archive_verified: bool = False,
     runtime_config_path: Path | str = DEFAULT_RUNTIME_CONFIG_PATH,
     cutover_run_id: str | None = None,
+    formal_launcher_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Atomically place a verified candidate, only with explicit authorization.
 
@@ -337,6 +343,15 @@ def perform_production_cutover(
             "same-volume guard failed before any move or replace: "
             f"{path_info}"
         )
+    try:
+        verify_production_interpreter()
+        verify_formal_launcher_evidence(
+            formal_launcher_evidence,
+            candidate=candidate_path,
+            legacy_archive=archive_path,
+        )
+    except ProductionEnvironmentError as exc:
+        raise CutoverBlocked(f"formal launcher pre-swap gate failed: {exc}") from exc
     if not candidate_handle_free:
         raise CutoverBlocked("candidate handle-free rename proof is required before production replacement")
     archive_precreated = archive_path.exists()

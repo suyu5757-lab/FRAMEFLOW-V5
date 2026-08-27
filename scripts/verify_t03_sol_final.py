@@ -21,12 +21,21 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy import delete
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.migration.legacy_compat import LegacyReadOnlyCompatibility
+from core.migration.production_environment import (
+    FORMAL_LAUNCHER_EVIDENCE_VERSION,
+    FORMAL_PYTHON,
+    verify_production_interpreter,
+)
+from core.schemas.runtime_mvp import metadata
 from core.runtime.persistence import RuntimeStartupConfig, write_runtime_startup_config
+from core.runtime.state_store import StateStore
 from core.runtime.state_store.factory import CANONICAL_DATABASE_PATH, inspect_database
 
 
@@ -232,6 +241,26 @@ def verify_read_only(legacy: Path) -> dict[str, Any]:
     }
 
 
+def cleanup_probe_fixtures(candidate: Path, fixture_ids: list[str]) -> dict[str, Any]:
+    """Remove only IDs created by this isolated formal-launcher probe."""
+
+    if not fixture_ids or any(not item.startswith("T03R2_") for item in fixture_ids):
+        raise AssertionError(f"refusing unsafe probe cleanup IDs: {fixture_ids}")
+    with StateStore(candidate, initialize=False) as store:
+        with store.transaction() as connection:
+            events = metadata.tables["events"]
+            sequences = metadata.tables["sequences"]
+            projects = metadata.tables["projects"]
+            entity_ids = [*fixture_ids, *(f"{item}:SQ001" for item in fixture_ids)]
+            connection.execute(delete(events).where(events.c.entity_id.in_(entity_ids)))
+            connection.execute(delete(sequences).where(sequences.c.project_id.in_(fixture_ids)))
+            connection.execute(delete(projects).where(projects.c.id.in_(fixture_ids)))
+        remaining = [item for item in fixture_ids if store.get_project(item) is not None]
+    if remaining:
+        raise AssertionError(f"formal launcher probe fixture cleanup failed: {remaining}")
+    return {"removed": fixture_ids, "remaining": remaining, "passed": True}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", type=Path, required=True)
@@ -244,6 +273,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if Path(sys.executable).resolve() != FORMAL_PYTHON.resolve():
+        raise SystemExit(
+            f"formal launcher probe requires {FORMAL_PYTHON}; actual={sys.executable}"
+        )
+    interpreter_gate = verify_production_interpreter()
     candidate = args.candidate.expanduser().resolve(strict=False)
     legacy = args.legacy.expanduser().resolve(strict=False)
     config_path = args.config.expanduser().resolve(strict=False)
@@ -307,10 +341,31 @@ def main() -> int:
         finally:
             stop_backend(process)
 
+    fixture_cleanup = cleanup_probe_fixtures(
+        candidate, [str(result["fixture_id"]) for result in results]
+    )
+    candidate_post_probe = inspect_database(candidate)
+    candidate_sha256_after_probe = sha256(candidate)
+
     payload = {
+        "formal_launcher_evidence_version": FORMAL_LAUNCHER_EVIDENCE_VERSION,
         "status": "PASS",
+        "interpreter_gate": interpreter_gate,
+        "formal_launcher_command": [
+            str(FORMAL_PYTHON.resolve()),
+            "-m",
+            "uvicorn",
+            "server:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(args.port),
+        ],
         "candidate": str(candidate),
         "candidate_info": candidate_info,
+        "candidate_post_probe_info": candidate_post_probe,
+        "candidate_sha256_after_probe": candidate_sha256_after_probe,
+        "probe_fixture_cleanup": fixture_cleanup,
         "legacy": str(legacy),
         "runtime_config": str(config_path),
         "runtime_config_payload": json.loads(config_path.read_text(encoding="utf-8")),

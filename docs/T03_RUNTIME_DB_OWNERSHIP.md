@@ -2,18 +2,23 @@
 
 Audit date: 2026-08-27
 Branch: `dev/v5.3.2`
-HEAD at audit: `46cba108d0ce54eebc4d95ae5309e95900c275bd`
+HEAD at audit: `e213121feb9ed76bc23433fd85e064445b1938d9`
 Canonical production path: `D:\11067\CodexWorkspaces\frameflow-v3\data\frameflow.db`
 
 ## Verdict
 
-**T03-R3E final cutover: ROLLED_BACK. Current runtime source of truth: LEGACY_V3.**
+**T03 final production cutover: ROLLED_BACK. Current runtime source of truth: LEGACY_V3.**
 
-The one authorized R3E atomic replacement completed, but the post-cutover
-legacy compatibility gate failed because the V5 production process was started
-without `FRAMEFLOW_LEGACY_READONLY_DB`. The V5 database was preserved for
-diagnosis, the permanent Legacy archive remains in place, and the canonical
-path was atomically restored from that archive. No second cutover was attempted.
+The final authorized atomic replacement completed with the new restart-safe
+configuration pointing to the new permanent archive. The formal scheduled-task
+launcher then exited before binding 8787 because its fixed project `.venv`
+lacks `jsonschema`; importing `core.migration.legacy_compat` raised
+`ModuleNotFoundError`. The same launcher also failed after Legacy restoration,
+proving this was a launcher environment failure rather than a V5 database or
+startup-config validation failure. The failed V5 database was preserved, the
+canonical path was atomically restored from the new archive, the V5 startup
+config was removed, and Legacy health was restored with the exact global-Python
+Uvicorn command observed before cutover. No second cutover was attempted.
 
 The V5 `StateStore` factory, `RuntimePersistence` facade, explicit `v5` mode,
 and read-only legacy compatibility adapter are present. In V5 mode, the
@@ -21,26 +26,37 @@ application startup and P0 API gateway use the facade; old V3 handlers are
 not dispatched and return an explicit out-of-scope response. Therefore
 `INVALID_DIRECT_ACCESS=0` for V5 runtime reachability.
 
-The current production runtime is again `FRAMEFLOW_RUNTIME_MODE=legacy`; the
+The current production runtime is again the default `legacy` mode; the
 legacy branch owns the canonical V3 file after rollback. The V5 branch is not
 the active production runtime, and the Legacy writable runtime has not been
-disabled because the R3E cutover did not pass its post-cutover gates.
+disabled because the final cutover did not pass its first-start health gate.
 
 There is no dual write or dual source of truth after rollback: the Legacy V3
 runtime is the sole active writable source, while the archived Legacy snapshot
 is read-only. The failed V5 production database is preserved outside the
 active runtime for diagnosis only.
 
-## R3E rollback evidence
+The subsequent Production Environment Closure repaired the project `.venv`,
+declared `jsonschema==4.26.0`, synchronized the existing runtime manifest, and
+added a mandatory exact-interpreter/two-boot formal-launcher gate before any
+future replacement. The real scheduled task now starts Legacy 8787 successfully,
+and the isolated formal `.venv` probe passed 19/19 plus SH004-SH020 17/17 on
+both first start and restart. No new production cutover was performed by that
+closure task, so the ownership verdict remains Legacy V3 until separately
+authorized retry.
 
-The complete attempt and gate results are recorded in
-`docs/T03_R3E_FINAL_PRODUCTION_CUTOVER_REPORT.md`. The permanent archive is:
+## Final cutover rollback evidence
 
-`D:\11067\CodexWorkspaces\frameflow-v3\archives\migrations\v5.3.2\T03R3E-20260827T073218Z-1d10d139`
+The complete final attempt and gate results are recorded in
+`docs/T03_FINAL_PRODUCTION_CUTOVER_AND_AUDIT.md`. The new permanent archive is:
 
-It contains the five required archive files. The current canonical database is
-Legacy V3 again; production V5 ownership is **not active** until a separately
-authorized future cutover.
+`D:\11067\CodexWorkspaces\frameflow-v3\archives\migrations\v5.3.2\T03FINAL-20260827T084503Z-b71c4c75`
+
+It contains exactly the five required read-only archive files. The failed V5
+database is preserved at
+`data\.cutover\T03FINAL-20260827T084503Z-b71c4c75\failed_v5_production.db`.
+The current canonical database is Legacy V3 again; production V5 ownership is
+**not active**.
 
 ## Source facts
 
@@ -50,15 +66,15 @@ The production file was opened with SQLite read-only URI mode for this audit.
 |---|---|
 | Path | `D:\11067\CodexWorkspaces\frameflow-v3\data\frameflow.db` |
 | Size | 3,657,728 bytes |
-| SHA-256 | `fccac6a29fa5c91d0ccccdc2545ae1f17010e9349aadd60712401e54d0142cf6` |
+| SHA-256 | `b02ec8bdf4f70b751152e73b3a311e6dcc1bedb566801d39d31c083d1adbfd69` |
 | Tables | 41 legacy V3 tables |
 | Schema marker | `schema_migrations` version 16 |
-| Journal mode | `wal` |
+| Journal mode | `delete` |
 | Raw connection foreign keys | `0` (V3 `Database.connect()` enables it per connection) |
 | Busy timeout | `5000` |
 | Integrity check | `ok` |
 | Foreign-key check | 0 violations |
-| Source changed during audit | NO |
+| Source changed during audit | YES — expected Legacy startup provider state after rollback; permanent archive remains unchanged |
 
 The current project document contains `SH001` through `SH020`. A fresh
 side-by-side candidate was generated in a temporary directory. The candidate
