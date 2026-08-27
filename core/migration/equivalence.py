@@ -13,7 +13,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from core.schemas.runtime_mvp import RUNTIME_TABLE_NAMES
 
@@ -24,9 +24,12 @@ from .validation import validate_candidate
 
 INTERNAL_TABLES = {"alembic_version", "sqlite_sequence"}
 MIGRATION_REVISION = "20260826_01"
-MIGRATION_IMPLEMENTATION_VERSION = "v3_to_v5:20260826_01"
+MIGRATION_IMPLEMENTATION_VERSION = "v3_to_v5:20260826_01-deterministic-v2"
 SCHEMA_CONTRACT_VERSION = "runtime-mvp:5.3.2"
 REQUIRED_LEGACY_SHOT_IDS = tuple(f"SH{number:03d}" for number in range(4, 21))
+A0_STAGE = "A0_MIGRATION_BASELINE"
+A1_STAGE = "A1_POST_SMOKE"
+B0_STAGE = "B0_MIGRATION_BASELINE"
 
 
 class CandidateEquivalenceError(RuntimeError):
@@ -234,6 +237,7 @@ def logical_data_fingerprint(path: Path | str) -> dict[str, Any]:
                 "columns": columns,
                 "primary_key_columns": pk_columns,
                 "row_count": len(rows),
+                "rows": rows,
                 "sha256": _digest(table_payload),
             }
             primary_keys[table_name] = pk_rows
@@ -253,6 +257,147 @@ def logical_data_fingerprint(path: Path | str) -> dict[str, Any]:
         }
     finally:
         connection.close()
+
+
+def compare_logical_fingerprints(
+    left: Mapping[str, Any], right: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Return table, PK, row, and field deltas between saved fingerprints."""
+
+    left_tables = left.get("tables") if isinstance(left.get("tables"), Mapping) else {}
+    right_tables = right.get("tables") if isinstance(right.get("tables"), Mapping) else {}
+    tables: list[dict[str, Any]] = []
+    different_tables: list[str] = []
+    for table_name in RUNTIME_TABLE_NAMES:
+        left_table = left_tables.get(table_name, {})
+        right_table = right_tables.get(table_name, {})
+        left_sha = left_table.get("sha256") if isinstance(left_table, Mapping) else None
+        right_sha = right_table.get("sha256") if isinstance(right_table, Mapping) else None
+        same = left_sha is not None and left_sha == right_sha
+        item: dict[str, Any] = {
+            "table": table_name,
+            "left_sha256": left_sha,
+            "right_sha256": right_sha,
+            "same": same,
+        }
+        if not same:
+            different_tables.append(table_name)
+            left_rows = (
+                left_table.get("rows", []) if isinstance(left_table, Mapping) else []
+            )
+            right_rows = (
+                right_table.get("rows", []) if isinstance(right_table, Mapping) else []
+            )
+            primary_keys = list(
+                (left_table.get("primary_key_columns") if isinstance(left_table, Mapping) else None)
+                or (right_table.get("primary_key_columns") if isinstance(right_table, Mapping) else None)
+                or []
+            )
+            columns = list(
+                (left_table.get("columns") if isinstance(left_table, Mapping) else None)
+                or (right_table.get("columns") if isinstance(right_table, Mapping) else None)
+                or []
+            )
+
+            def row_key(row: Mapping[str, Any]) -> str:
+                values = [row.get(column) for column in primary_keys]
+                return _canonical_json(values)
+
+            left_by_pk = {
+                row_key(row): row for row in left_rows if isinstance(row, Mapping)
+            }
+            right_by_pk = {
+                row_key(row): row for row in right_rows if isinstance(row, Mapping)
+            }
+            only_left = sorted(set(left_by_pk) - set(right_by_pk))
+            only_right = sorted(set(right_by_pk) - set(left_by_pk))
+            changed_rows: list[dict[str, Any]] = []
+            for key in sorted(set(left_by_pk) & set(right_by_pk)):
+                left_row = left_by_pk[key]
+                right_row = right_by_pk[key]
+                fields = {
+                    column: {"left": left_row.get(column), "right": right_row.get(column)}
+                    for column in columns
+                    if left_row.get(column) != right_row.get(column)
+                }
+                if fields:
+                    changed_rows.append(
+                        {
+                            "pk": json.loads(key),
+                            "fields": fields,
+                        }
+                    )
+            item.update(
+                {
+                    "primary_key_columns": primary_keys,
+                    "only_in_left": [json.loads(key) for key in only_left],
+                    "only_in_right": [json.loads(key) for key in only_right],
+                    "same_pk_changed_rows": changed_rows,
+                    "row_delta_available": (
+                        bool(primary_keys)
+                        and isinstance(left_table, Mapping)
+                        and isinstance(right_table, Mapping)
+                        and "rows" in left_table
+                        and "rows" in right_table
+                    ),
+                }
+            )
+        tables.append(item)
+    return {
+        "same": not different_tables,
+        "left_sha256": left.get("sha256"),
+        "right_sha256": right.get("sha256"),
+        "different_tables": different_tables,
+        "tables": tables,
+    }
+
+
+def build_smoke_delta(
+    a0: Mapping[str, Any],
+    a1: Mapping[str, Any],
+    *,
+    fixture_ids: Iterable[str] = (),
+    expected_runtime_tables: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Classify A0-to-A1 changes without weakening A0/B0 equivalence."""
+
+    left = a0.get("logical_fingerprint")
+    right = a1.get("logical_fingerprint")
+    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+        raise CandidateEquivalenceError("A0/A1 logical fingerprints are required")
+    delta = compare_logical_fingerprints(left, right)
+    fixture_tokens = tuple(str(value) for value in fixture_ids)
+    expected_tables = {str(value) for value in expected_runtime_tables}
+    classifications: list[dict[str, Any]] = []
+    cleanup_defects: list[dict[str, Any]] = []
+    unexpected: list[dict[str, Any]] = []
+    for table in delta["tables"]:
+        if table["same"]:
+            continue
+        rendered = _canonical_json(table)
+        fixture_related = bool(fixture_tokens) and any(
+            token in rendered for token in fixture_tokens
+        )
+        if fixture_related:
+            classification = "TEST_CLEANUP_DEFECT"
+            cleanup_defects.append(table)
+        elif table["table"] in expected_tables:
+            classification = "EXPECTED_RUNTIME_METADATA"
+        else:
+            classification = "UNEXPECTED_RUNTIME_SIDE_EFFECT"
+            unexpected.append(table)
+        classifications.append(
+            {"table": table["table"], "classification": classification}
+        )
+    return {
+        **delta,
+        "fixture_ids": list(fixture_tokens),
+        "classifications": classifications,
+        "cleanup_defects": cleanup_defects,
+        "unexpected_side_effects": unexpected,
+        "smoke_fixture_cleanup_passed": not cleanup_defects,
+        "passed": not cleanup_defects and not unexpected,
+    }
 
 
 def _accounting_from_manifest(
@@ -328,6 +473,10 @@ def build_candidate_evidence(
     validation: Mapping[str, Any] | None = None,
     rename: Mapping[str, Any] | None = None,
     formal_launcher: Mapping[str, Any] | None = None,
+    evidence_stage: str | None = None,
+    captured_before_backend: bool | None = None,
+    captured_after_smoke: bool | None = None,
+    captured_before_swap: bool | None = None,
 ) -> dict[str, Any]:
     """Collect auditable evidence without opening a Runtime backend."""
 
@@ -362,12 +511,49 @@ def build_candidate_evidence(
             required_shots=REQUIRED_LEGACY_SHOT_IDS,
         ),
     }
+    if evidence_stage is not None:
+        evidence["evidence_stage"] = str(evidence_stage)
+    if captured_before_backend is not None:
+        evidence["captured_before_backend"] = bool(captured_before_backend)
+    if captured_after_smoke is not None:
+        evidence["captured_after_smoke"] = bool(captured_after_smoke)
+    if captured_before_swap is not None:
+        evidence["captured_before_swap"] = bool(captured_before_swap)
     if rename is not None:
         evidence["rename"] = dict(rename)
         evidence["rename_passed"] = rename.get("passed") is True
     if formal_launcher is not None:
         evidence["formal_launcher_evidence"] = dict(formal_launcher)
     return evidence
+
+
+def build_candidate_a_lifecycle_evidence(
+    a0: Mapping[str, Any],
+    a1: Mapping[str, Any],
+    *,
+    formal_launcher: Mapping[str, Any],
+    rename: Mapping[str, Any],
+    smoke_delta: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind immutable A0 migration proof to separate A1 runtime proof."""
+
+    candidate = str(a0.get("candidate") or "")
+    if not candidate or candidate != str(a1.get("candidate") or ""):
+        raise CandidateEquivalenceError("A0 and A1 must name the same Candidate A")
+    return {
+        "candidate": candidate,
+        "migration_baseline": dict(a0),
+        "post_smoke": dict(a1),
+        "formal_launcher_evidence": dict(formal_launcher),
+        "rename": dict(rename),
+        "rename_passed": rename.get("passed") is True,
+        "smoke_delta": dict(smoke_delta),
+    }
+
+
+def _migration_baseline(evidence: Mapping[str, Any]) -> Mapping[str, Any]:
+    baseline = evidence.get("migration_baseline")
+    return baseline if isinstance(baseline, Mapping) else evidence
 
 
 def _schema_value(evidence: Mapping[str, Any]) -> Any:
@@ -413,13 +599,15 @@ def verify_candidate_equivalence(
     candidate_a: Mapping[str, Any],
     candidate_b: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Compare Candidate A smoke evidence with Candidate B swap evidence."""
+    """Compare only Candidate A's A0 baseline with Candidate B's B0 baseline."""
 
     errors: list[str] = []
     checks: dict[str, bool] = {}
+    candidate_a0 = _migration_baseline(candidate_a)
+    candidate_b0 = _migration_baseline(candidate_b)
 
-    source_a = str(candidate_a.get("source_legacy_sha") or "")
-    source_b = str(candidate_b.get("source_legacy_sha") or "")
+    source_a = str(candidate_a0.get("source_legacy_sha") or "")
+    source_b = str(candidate_b0.get("source_legacy_sha") or "")
     checks["same_frozen_source"] = bool(source_a) and source_a == source_b
     if not checks["same_frozen_source"]:
         errors.append("source_legacy_sha differs or is missing")
@@ -429,61 +617,69 @@ def verify_candidate_equivalence(
         ("migration_implementation_version", "migration_implementation_version"),
         ("schema_contract_version", "schema_contract_version"),
     ):
-        left = str(candidate_a.get(key) or "")
-        right = str(candidate_b.get(key) or "")
+        left = str(candidate_a0.get(key) or "")
+        right = str(candidate_b0.get(key) or "")
         checks[label] = bool(left) and left == right
         if not checks[label]:
             errors.append(f"{label} differs or is missing")
 
-    schema_a = _schema_value(candidate_a)
-    schema_b = _schema_value(candidate_b)
+    schema_a = _schema_value(candidate_a0)
+    schema_b = _schema_value(candidate_b0)
     checks["schema_equivalence"] = schema_a is not None and schema_a == schema_b
     if not checks["schema_equivalence"]:
         errors.append("schema fingerprints differ")
 
-    logical_a = _logical_value(candidate_a)
-    logical_b = _logical_value(candidate_b)
+    logical_a = _logical_value(candidate_a0)
+    logical_b = _logical_value(candidate_b0)
     checks["logical_data_equivalence"] = logical_a is not None and logical_a == logical_b
     if not checks["logical_data_equivalence"]:
         errors.append("logical data fingerprints differ")
 
-    primary_keys_a = (candidate_a.get("logical_fingerprint") or {}).get("primary_keys") if isinstance(candidate_a.get("logical_fingerprint"), Mapping) else None
-    primary_keys_b = (candidate_b.get("logical_fingerprint") or {}).get("primary_keys") if isinstance(candidate_b.get("logical_fingerprint"), Mapping) else None
-    checks["business_pk_equivalence"] = primary_keys_a is None or primary_keys_a == primary_keys_b
+    primary_keys_a = (candidate_a0.get("logical_fingerprint") or {}).get("primary_keys") if isinstance(candidate_a0.get("logical_fingerprint"), Mapping) else None
+    primary_keys_b = (candidate_b0.get("logical_fingerprint") or {}).get("primary_keys") if isinstance(candidate_b0.get("logical_fingerprint"), Mapping) else None
+    checks["business_pk_equivalence"] = primary_keys_a is not None and primary_keys_a == primary_keys_b
     if not checks["business_pk_equivalence"]:
         errors.append("business primary keys differ")
 
-    accounting_a = _accounting_value(candidate_a)
-    accounting_b = _accounting_value(candidate_b)
+    accounting_a = _accounting_value(candidate_a0)
+    accounting_b = _accounting_value(candidate_b0)
     checks["row_accounting_equivalence"] = accounting_a is not None and accounting_a == accounting_b
     if not checks["row_accounting_equivalence"]:
         errors.append("row accounting differs")
 
-    if "backend_opened" in candidate_b or "candidate_b_backend_opened" in candidate_b:
-        backend_opened = candidate_b.get("backend_opened", candidate_b.get("candidate_b_backend_opened"))
+    if "backend_opened" in candidate_b0 or "candidate_b_backend_opened" in candidate_b0:
+        backend_opened = candidate_b0.get("backend_opened", candidate_b0.get("candidate_b_backend_opened"))
         checks["candidate_b_backend_opened"] = backend_opened is False
         if not checks["candidate_b_backend_opened"]:
             errors.append("Candidate B backend-opened must be NO")
 
-    validation_passed = _passed_validation(candidate_b)
+    validation_passed = _passed_validation(candidate_b0)
     if validation_passed is not None:
         checks["candidate_b_validation"] = validation_passed
         if not validation_passed:
             errors.append("Candidate B validation failed")
 
-    rename_passed = _passed_rename(candidate_b)
+    rename_passed = _passed_rename(candidate_b0)
     if rename_passed is not None:
         checks["candidate_b_rename"] = rename_passed
         if not rename_passed:
             errors.append("Candidate B rename probe failed")
+
+    logical_delta = None
+    left_fingerprint = candidate_a0.get("logical_fingerprint")
+    right_fingerprint = candidate_b0.get("logical_fingerprint")
+    if isinstance(left_fingerprint, Mapping) and isinstance(right_fingerprint, Mapping):
+        logical_delta = compare_logical_fingerprints(left_fingerprint, right_fingerprint)
 
     return {
         "passed": not errors,
         "ready": not errors,
         "errors": errors,
         "checks": checks,
-        "candidate_a": candidate_a.get("candidate"),
-        "candidate_b": candidate_b.get("candidate"),
+        "candidate_a": candidate_a0.get("candidate"),
+        "candidate_b": candidate_b0.get("candidate"),
+        "comparison_stage": "A0_VS_B0",
+        "logical_delta": logical_delta,
     }
 
 
@@ -522,28 +718,77 @@ def verify_final_candidate_gate(
     result = verify_candidate_equivalence(candidate_a, candidate_b)
     errors = list(result["errors"])
     checks = dict(result["checks"])
+    candidate_a0 = _migration_baseline(candidate_a)
+    candidate_b0 = _migration_baseline(candidate_b)
+    candidate_a1 = candidate_a.get("post_smoke")
+
+    checks["a0_stage"] = candidate_a0.get("evidence_stage") == A0_STAGE
+    checks["a0_captured_before_backend"] = (
+        candidate_a0.get("captured_before_backend") is True
+        and candidate_a0.get("backend_opened") is False
+    )
+    checks["b0_stage"] = candidate_b0.get("evidence_stage") == B0_STAGE
+    checks["b0_captured_before_swap"] = (
+        candidate_b0.get("captured_before_swap") is True
+        and candidate_b0.get("backend_opened") is False
+    )
+    checks["a1_stage"] = (
+        isinstance(candidate_a1, Mapping)
+        and candidate_a1.get("evidence_stage") == A1_STAGE
+        and candidate_a1.get("captured_after_smoke") is True
+        and candidate_a1.get("backend_opened") is True
+    )
+    checks["candidate_a_lifecycle_path"] = (
+        isinstance(candidate_a1, Mapping)
+        and str(candidate_a.get("candidate") or "")
+        == str(candidate_a0.get("candidate") or "")
+        == str(candidate_a1.get("candidate") or "")
+    )
+    for check, message in (
+        ("a0_stage", "Candidate A A0 migration baseline evidence is missing"),
+        ("a0_captured_before_backend", "Candidate A A0 was not captured before backend open"),
+        ("a1_stage", "Candidate A A1 post-smoke evidence is missing"),
+        ("b0_stage", "Candidate B B0 migration baseline evidence is missing"),
+        ("b0_captured_before_swap", "Candidate B B0 was not captured before swap"),
+        ("candidate_a_lifecycle_path", "Candidate A A0/A1 lifecycle paths differ"),
+    ):
+        if not checks[check]:
+            errors.append(message)
 
     launcher_passed, launcher_detail = _formal_launcher_passed(candidate_a)
     checks["candidate_a_formal_launcher"] = launcher_passed
     if not launcher_passed:
         errors.append(launcher_detail["reason"])
 
+    smoke_delta = candidate_a.get("smoke_delta")
+    checks["smoke_fixture_cleanup"] = (
+        isinstance(smoke_delta, Mapping)
+        and smoke_delta.get("smoke_fixture_cleanup_passed") is True
+    )
+    checks["smoke_delta_audit"] = (
+        isinstance(smoke_delta, Mapping) and smoke_delta.get("passed") is True
+    )
+    if not checks["smoke_fixture_cleanup"]:
+        errors.append("Candidate A smoke fixture cleanup failed")
+    if not checks["smoke_delta_audit"]:
+        errors.append("Candidate A smoke delta contains an unexpected side effect")
+
     a_rename = _passed_rename(candidate_a)
     checks["candidate_a_rename"] = a_rename is True
     if a_rename is not True:
         errors.append("Candidate A rename probe did not pass")
 
-    checks["candidate_b_backend_opened"] = candidate_b.get("backend_opened") is False
+    checks["candidate_b_backend_opened"] = candidate_b0.get("backend_opened") is False
     if not checks["candidate_b_backend_opened"]:
         errors.append("Candidate B backend-opened must be NO")
-    checks["candidate_b_validation"] = _passed_validation(candidate_b) is True
+    checks["candidate_b_validation"] = _passed_validation(candidate_b0) is True
     if not checks["candidate_b_validation"]:
         errors.append("Candidate B validation must pass")
-    checks["candidate_b_rename"] = _passed_rename(candidate_b) is True
+    checks["candidate_b_rename"] = _passed_rename(candidate_b0) is True
     if not checks["candidate_b_rename"]:
         errors.append("Candidate B rename probe must pass")
 
-    accounting = candidate_b.get("row_accounting")
+    accounting = candidate_b0.get("row_accounting")
     if not isinstance(accounting, Mapping):
         errors.append("row accounting evidence missing")
     else:
@@ -565,12 +810,18 @@ def verify_final_candidate_gate(
 
 
 __all__ = [
+    "A0_STAGE",
+    "A1_STAGE",
+    "B0_STAGE",
     "CandidateEquivalenceError",
     "MIGRATION_IMPLEMENTATION_VERSION",
     "MIGRATION_REVISION",
     "REQUIRED_LEGACY_SHOT_IDS",
     "SCHEMA_CONTRACT_VERSION",
     "build_candidate_evidence",
+    "build_candidate_a_lifecycle_evidence",
+    "build_smoke_delta",
+    "compare_logical_fingerprints",
     "logical_data_fingerprint",
     "schema_fingerprint",
     "verify_candidate_equivalence",

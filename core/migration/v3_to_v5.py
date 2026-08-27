@@ -8,6 +8,7 @@ opens the production database for writing and never moves project media.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from copy import deepcopy
@@ -82,6 +83,8 @@ DERIVED_EVENT_TABLES = {
     "workflow_run_events_v3",
 }
 
+DETERMINISTIC_TIMESTAMP_FALLBACK = "1970-01-01T00:00:00+00:00"
+
 
 class MigrationError(RuntimeError):
     """Raised when a legacy-to-candidate migration must abort safely."""
@@ -140,6 +143,12 @@ def _text(value: Any, default: str = "") -> str:
     if value is None:
         return default
     return value if isinstance(value, str) else str(value)
+
+
+def _stable_timestamp(value: Any, fallback: Any = None) -> str:
+    """Return a source-derived timestamp without consulting wall-clock time."""
+
+    return _text(value, _text(fallback, DETERMINISTIC_TIMESTAMP_FALLBACK))
 
 
 def _number(value: Any, default: float, warnings: list[str], label: str) -> float:
@@ -257,7 +266,40 @@ def _empty_accounting(info: dict[str, Any]) -> dict[str, Any]:
 
 
 def _rows(connection: sqlite3.Connection, table_name: str) -> list[sqlite3.Row]:
-    return connection.execute(f"SELECT * FROM {_quote(table_name)}").fetchall()
+    columns = connection.execute(f"PRAGMA table_info({_quote(table_name)})").fetchall()
+    primary_keys = [
+        str(row[1])
+        for row in sorted(columns, key=lambda item: int(item[5]))
+        if int(row[5]) > 0
+    ]
+    order_by = ", ".join(_quote(column) for column in primary_keys) or "rowid"
+    return connection.execute(
+        f"SELECT * FROM {_quote(table_name)} ORDER BY {order_by}"
+    ).fetchall()
+
+
+def _project_timestamps(
+    candidate: sqlite3.Connection, project_id: str
+) -> tuple[str, str]:
+    row = candidate.execute(
+        "SELECT created_at, updated_at FROM projects WHERE id=?", (project_id,)
+    ).fetchone()
+    if row is None:
+        return DETERMINISTIC_TIMESTAMP_FALLBACK, DETERMINISTIC_TIMESTAMP_FALLBACK
+    created = _stable_timestamp(row[0])
+    return created, _stable_timestamp(row[1], created)
+
+
+def _stable_row_token(table_name: str, row: Mapping[str, Any], ordinal: int) -> str:
+    payload = {
+        "table": table_name,
+        "ordinal": ordinal,
+        "row": {key: row[key] for key in sorted(row.keys())},
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()[:32]
 
 
 def _document(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -302,8 +344,12 @@ def _insert_project(
         warnings,
         f"project {project_id}.target_duration",
     )
-    created = _text(_value(row, "created_at"), datetime.now(UTC).isoformat())
-    updated = _text(_value(row, "updated_at"), created)
+    created = _stable_timestamp(
+        _value(row, "created_at", default=document.get("createdAt"))
+    )
+    updated = _stable_timestamp(
+        _value(row, "updated_at", default=document.get("updatedAt")), created
+    )
     status = _project_status(_value(row, "lifecycle_status", default=document.get("lifecycleStatus")))
     candidate.execute(
         "INSERT INTO projects(id,title,aspect_ratio,fps,target_duration,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -333,10 +379,11 @@ def _insert_sequences_and_shots(
             sid = _sequence_id(shot, project_id)
             if sid not in sequence_ids:
                 sequence_ids.append(sid)
+        project_created, project_updated = _project_timestamps(candidate, project_id)
         for order_index, sequence_id in enumerate(sequence_ids, start=1):
             candidate.execute(
-                "INSERT INTO sequences(id,project_id,order_index) VALUES(?,?,?)",
-                (sequence_id, project_id, order_index),
+                "INSERT INTO sequences(id,project_id,order_index,created_at) VALUES(?,?,?,?)",
+                (sequence_id, project_id, order_index, project_created),
             )
             sequence_count += 1
         sequence_lookup = {sid: sid for sid in sequence_ids}
@@ -354,7 +401,7 @@ def _insert_sequences_and_shots(
                     raise MigrationError(f"{shot_id} ShotSpec validation failed: {errors[0].message}")
                 sequence_id = _sequence_id(shot, project_id)
                 candidate.execute(
-                    "INSERT INTO shots(id,project_id,sequence_id,shot_spec_json,metadata_json,continuity_in,continuity_out) VALUES(?,?,?,?,?,?,?)",
+                    "INSERT INTO shots(id,project_id,sequence_id,shot_spec_json,metadata_json,continuity_in,continuity_out,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                     (
                         shot_id,
                         project_id,
@@ -363,6 +410,12 @@ def _insert_sequences_and_shots(
                         _json_text(_value(shot, "metadata_json", "metadata", default={}), {}),
                         _json_text(spec.get("continuity_state_in"), None) if spec.get("continuity_state_in") is not None else None,
                         _json_text(spec.get("continuity_state_out"), None) if spec.get("continuity_state_out") is not None else None,
+                        _stable_timestamp(
+                            _value(shot, "created_at", "createdAt"), project_created
+                        ),
+                        _stable_timestamp(
+                            _value(shot, "updated_at", "updatedAt"), project_updated
+                        ),
                     ),
                 )
                 shot_count += 1
@@ -400,8 +453,9 @@ def _insert_document_assets(
             if _text(_value(asset, "status")).upper() == "LOCKED":
                 status = "LOCKED"
             version = _text(_value(asset, "version", default="1"), "1")
+            project_created, _project_updated = _project_timestamps(candidate, project_id)
             candidate.execute(
-                "INSERT INTO assets(id,project_id,type,status,version,master_artifact_id,locked_at) VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO assets(id,project_id,type,status,version,master_artifact_id,locked_at,created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (
                     asset_id,
                     project_id,
@@ -410,6 +464,9 @@ def _insert_document_assets(
                     version[:64],
                     _value(asset, "master_artifact_id", "masterArtifactId"),
                     _value(asset, "locked_at", "lockedAt"),
+                    _stable_timestamp(
+                        _value(asset, "created_at", "createdAt"), project_created
+                    ),
                 ),
             )
             seen.add(asset_id)
@@ -440,8 +497,9 @@ def _insert_asset_versions(
             count += 1
             continue
         status = _text(_value(row, "status", default="DRAFT"), "DRAFT").upper()[:32]
+        project_created, _project_updated = _project_timestamps(candidate, project_id)
         candidate.execute(
-            "INSERT INTO assets(id,project_id,type,status,version,master_artifact_id,locked_at) VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO assets(id,project_id,type,status,version,master_artifact_id,locked_at,created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 logical_id,
                 project_id,
@@ -450,6 +508,7 @@ def _insert_asset_versions(
                 _text(_value(row, "version", default="1"), "1")[:64],
                 _value(row, "artifact_id"),
                 _value(row, "approved_at") if status in {"APPROVED", "LOCKED"} else None,
+                _stable_timestamp(_value(row, "created_at"), project_created),
             ),
         )
         accounting["asset_versions"]["migrated_rows"] += 1
@@ -491,8 +550,9 @@ def _insert_artifacts(
             asset_id = None
         metadata = _json(_value(row, "metadata_json", default={}), {})
         source_artifacts = metadata.get("source_artifacts", []) if isinstance(metadata, dict) else []
+        project_created, _project_updated = _project_timestamps(candidate, project_id)
         candidate.execute(
-            "INSERT INTO artifacts(id,project_id,shot_id,asset_id,type,role,path,sha256,version,source_task_id,source_artifacts_json,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO artifacts(id,project_id,shot_id,asset_id,type,role,path,sha256,version,source_task_id,source_artifacts_json,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 artifact_id,
                 project_id,
@@ -506,6 +566,7 @@ def _insert_artifacts(
                 _value(row, "task_id", "source_task_id"),
                 _json_text(source_artifacts, []),
                 _text(_value(row, "status", default="DRAFT"), "DRAFT")[:32],
+                _stable_timestamp(_value(row, "created_at"), project_created),
             ),
         )
         accounting["artifacts"]["migrated_rows"] += 1
@@ -540,8 +601,9 @@ def _insert_tasks(
         error = None
         if _value(row, "error_kind", "error_message") is not None:
             error = {"kind": _value(row, "error_kind"), "message": _value(row, "error_message")}
+        project_created, _project_updated = _project_timestamps(candidate, project_id)
         candidate.execute(
-            "INSERT INTO tasks(id,type,project_id,shot_id,status,priority,idempotency_key,attempt,max_attempts,timeout,worker,payload_json,result_json,error_json,started_at,heartbeat_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO tasks(id,type,project_id,shot_id,status,priority,idempotency_key,attempt,max_attempts,timeout,worker,payload_json,result_json,error_json,created_at,started_at,heartbeat_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 task_id,
                 _text(_value(row, "task_type", "type", default="legacy"), "legacy")[:64],
@@ -557,6 +619,7 @@ def _insert_tasks(
                 _json_text(request, {}),
                 _value(row, "result_json"),
                 _json_text(error, None) if error else None,
+                _stable_timestamp(_value(row, "created_at"), project_created),
                 None,
                 None,
                 _value(row, "updated_at"),
@@ -583,9 +646,11 @@ def _derive_events(
     for table_name in DERIVED_EVENT_TABLES:
         if table_name not in accounting:
             continue
-        for row in _rows(legacy, table_name):
+        for ordinal, row in enumerate(_rows(legacy, table_name)):
             entity_type, entity_id, event_type = _derived_entity(row, table_name)
-            event_id = f"EVT_LEGACY_{table_name}_{_text(_value(row, 'id'), uuid4().hex)}"[:120]
+            stable_token = _stable_row_token(table_name, row, ordinal)
+            source_id = _text(_value(row, "id"), stable_token)
+            event_id = f"EVT_LEGACY_{table_name}_{source_id}"[:120]
             payload = {
                 key: row[key]
                 for key in row.keys()
@@ -595,12 +660,12 @@ def _derive_events(
                 "INSERT INTO events(id,trace_id,entity_type,entity_id,event_type,payload,created_at) VALUES(?,?,?,?,?,?,?)",
                 (
                     event_id,
-                    f"TRACE_LEGACY_{table_name}_{_text(_value(row, 'id'), uuid4().hex)}"[:120],
+                    f"TRACE_LEGACY_{table_name}_{source_id}"[:120],
                     entity_type,
                     entity_id,
                     event_type,
                     _json_text(payload, {}),
-                    _value(row, "created_at", default=datetime.now(UTC).isoformat()),
+                    _stable_timestamp(_value(row, "created_at")),
                 ),
             )
             accounting[table_name]["derived_rows"] += 1

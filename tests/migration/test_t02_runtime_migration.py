@@ -5,6 +5,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -22,6 +23,7 @@ from core.migration.v3_to_v5 import (
     inspect_legacy_database,
     migrate_v3_to_v5,
 )
+from core.migration.equivalence import logical_data_fingerprint
 from core.migration.validation import validate_candidate
 from core.runtime.state_store import StateStore
 from core.schemas.runtime_mvp import RUNTIME_TABLE_NAMES
@@ -159,6 +161,21 @@ def create_legacy_fixture(path: Path, *, invalid_shot: bool = False) -> None:
 
 
 class T02RuntimeMigrationTests(unittest.TestCase):
+    def test_repeated_migrations_are_logically_deterministic_across_seconds(self) -> None:
+        source = unique_path("deterministic-source")
+        candidate_a = unique_path("deterministic-a")
+        candidate_b = unique_path("deterministic-b")
+        backup_a = unique_path("deterministic-backup-a")
+        backup_b = unique_path("deterministic-backup-b")
+        create_legacy_fixture(source)
+        migrate_v3_to_v5(source, candidate_a, backup_path=backup_a)
+        time.sleep(1.1)
+        migrate_v3_to_v5(source, candidate_b, backup_path=backup_b)
+        self.assertEqual(
+            logical_data_fingerprint(candidate_a)["sha256"],
+            logical_data_fingerprint(candidate_b)["sha256"],
+        )
+
     def test_legacy_discovery_returns_full_schema_facts_and_classification(self) -> None:
         source = unique_path("discovery")
         create_legacy_fixture(source)
