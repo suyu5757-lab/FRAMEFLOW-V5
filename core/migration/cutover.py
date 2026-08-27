@@ -15,6 +15,7 @@ import os
 import sqlite3
 import shutil
 import tempfile
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -38,6 +39,16 @@ from core.migration.production_environment import (
 )
 
 from .backup import create_backup, write_manifest
+from .equivalence import (
+    MIGRATION_IMPLEMENTATION_VERSION,
+    MIGRATION_REVISION,
+    SCHEMA_CONTRACT_VERSION,
+    build_candidate_evidence,
+    logical_data_fingerprint,
+    schema_fingerprint,
+    verify_candidate_equivalence,
+    verify_final_candidate_gate,
+)
 from .legacy_compat import account_legacy_shots, inspect_legacy_archive
 from .v3_to_v5 import migrate_v3_to_v5
 from .validation import validate_candidate
@@ -47,6 +58,8 @@ REQUIRED_LEGACY_SHOTS = tuple(f"SH{number:03d}" for number in range(4, 21))
 PROJECT_ROOT = CANONICAL_DATABASE_PATH.parent.parent
 DEFAULT_CUTOVER_STAGING_ROOT = CANONICAL_DATABASE_PATH.parent / ".cutover"
 DEFAULT_ARCHIVE_ROOT = PROJECT_ROOT / "archives" / "migrations" / "v5.3.2"
+RENAME_PROBE_RETRY_SECONDS = 2.0
+RENAME_PROBE_RETRY_INTERVAL_SECONDS = 0.05
 
 
 class CutoverBlocked(RuntimeError):
@@ -111,13 +124,28 @@ def handle_free_rename_probe(path: Path | str) -> dict[str, Any]:
     probe = resolved.with_name(f"{resolved.stem}.rename_probe{resolved.suffix}")
     if probe.exists():
         raise CutoverBlocked(f"rename probe target already exists: {probe}")
+
+    def replace_with_release_wait(source: Path, destination: Path) -> None:
+        deadline = time.monotonic() + RENAME_PROBE_RETRY_SECONDS
+        while True:
+            try:
+                os.replace(source, destination)
+                return
+            except PermissionError as exc:
+                # Windows can signal process exit before SQLite's last file
+                # handle has become renameable.  Wait only for that specific
+                # transient condition; a persistent lock still fails closed.
+                if getattr(exc, "winerror", None) != 32 or time.monotonic() >= deadline:
+                    raise
+                time.sleep(RENAME_PROBE_RETRY_INTERVAL_SECONDS)
+
     try:
-        os.replace(resolved, probe)
-        os.replace(probe, resolved)
+        replace_with_release_wait(resolved, probe)
+        replace_with_release_wait(probe, resolved)
     except Exception:
         # Restore the original name if the second rename is the failing side.
         if probe.exists() and not resolved.exists():
-            os.replace(probe, resolved)
+            replace_with_release_wait(probe, resolved)
         raise
     return {"path": str(resolved), "probe": str(probe), "passed": True}
 
@@ -209,6 +237,10 @@ def fresh_candidate_from_production(
         run_id=f"t03-{token}",
         manifest_path=manifest_path,
     )
+    manifest["source_legacy_sha"] = source_before["sha256"]
+    manifest["migration_revision"] = MIGRATION_REVISION
+    manifest["migration_implementation_version"] = MIGRATION_IMPLEMENTATION_VERSION
+    manifest["schema_contract_version"] = SCHEMA_CONTRACT_VERSION
     accounting = account_legacy_shots(backup_path, list(REQUIRED_LEGACY_SHOTS))
     manifest["t03_legacy_shot_accounting"] = accounting
     manifest["t03_source_fingerprint"] = source_before
@@ -272,12 +304,35 @@ def create_rollback_snapshot(
 
 
 def verify_candidate_gate(
-    candidate: Path | str,
+    candidate: Path | str | None = None,
     *,
     legacy_source: Path | str,
     required_shots: tuple[str, ...] = REQUIRED_LEGACY_SHOTS,
+    candidate_a_evidence: dict[str, Any] | None = None,
+    candidate_b_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Verify schema, SQLite health, StateStore ownership and shot accounting."""
+    """Verify either the legacy single-candidate gate or the final A/B gate.
+
+    The legacy call shape remains available for existing rehearsal callers.
+    Final cutover callers must provide both evidence mappings, which keeps the
+    formal launcher proof on Candidate A and the closed-file swap proof on B.
+    """
+
+    if candidate_a_evidence is not None or candidate_b_evidence is not None:
+        if candidate_a_evidence is None or candidate_b_evidence is None:
+            raise CutoverBlocked("Candidate A and Candidate B evidence are both required")
+        result = verify_final_candidate_gate(candidate_a_evidence, candidate_b_evidence)
+        return {
+            "candidate_model": "A_SMOKE+B_SWAP",
+            "candidate_a": candidate_a_evidence.get("candidate"),
+            "candidate_b": candidate_b_evidence.get("candidate"),
+            "equivalence": result,
+            "errors": result["errors"],
+            "ready": result["ready"],
+        }
+
+    if candidate is None:
+        raise CutoverBlocked("candidate is required for the legacy candidate gate")
 
     candidate_path = Path(candidate).expanduser().resolve(strict=False)
     if candidate_path == CANONICAL_DATABASE_PATH:
@@ -345,10 +400,40 @@ def perform_production_cutover(
         )
     try:
         verify_production_interpreter()
+        launcher_candidate = candidate_path
+        launcher_archive = archive_path
+        if isinstance(formal_launcher_evidence, dict) and (
+            "candidate_a_evidence" in formal_launcher_evidence
+            or "candidate_b_evidence" in formal_launcher_evidence
+        ):
+            candidate_a_evidence = formal_launcher_evidence.get("candidate_a_evidence")
+            candidate_b_evidence = formal_launcher_evidence.get("candidate_b_evidence")
+            if not isinstance(candidate_a_evidence, dict) or not isinstance(candidate_b_evidence, dict):
+                raise CutoverBlocked(
+                    "final A/B candidate evidence must include both mapping payloads"
+                )
+            launcher_candidate = Path(
+                str(candidate_a_evidence.get("candidate") or "")
+            ).expanduser().resolve(strict=False)
+            swap_evidence_candidate = Path(
+                str(candidate_b_evidence.get("candidate") or "")
+            ).expanduser().resolve(strict=False)
+            if swap_evidence_candidate != candidate_path:
+                raise CutoverBlocked("Candidate B evidence does not name the swap candidate")
+            if candidate_b_evidence.get("backend_opened") is not False:
+                raise CutoverBlocked("Candidate B backend-opened must be NO")
+            final_gate = verify_final_candidate_gate(
+                candidate_a_evidence, candidate_b_evidence
+            )
+            if not final_gate["ready"]:
+                raise CutoverBlocked(
+                    "final A/B candidate equivalence gate failed: "
+                    + "; ".join(final_gate["errors"])
+                )
         verify_formal_launcher_evidence(
             formal_launcher_evidence,
-            candidate=candidate_path,
-            legacy_archive=archive_path,
+            candidate=launcher_candidate,
+            legacy_archive=launcher_archive,
         )
     except ProductionEnvironmentError as exc:
         raise CutoverBlocked(f"formal launcher pre-swap gate failed: {exc}") from exc

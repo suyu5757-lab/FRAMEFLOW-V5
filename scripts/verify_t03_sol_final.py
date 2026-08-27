@@ -244,7 +244,8 @@ def verify_read_only(legacy: Path) -> dict[str, Any]:
 def cleanup_probe_fixtures(candidate: Path, fixture_ids: list[str]) -> dict[str, Any]:
     """Remove only IDs created by this isolated formal-launcher probe."""
 
-    if not fixture_ids or any(not item.startswith("T03R2_") for item in fixture_ids):
+    allowed_prefixes = ("T03R2_", "T03R3_SMOKE_SOL_")
+    if not fixture_ids or any(not item.startswith(allowed_prefixes) for item in fixture_ids):
         raise AssertionError(f"refusing unsafe probe cleanup IDs: {fixture_ids}")
     with StateStore(candidate, initialize=False) as store:
         with store.transaction() as connection:
