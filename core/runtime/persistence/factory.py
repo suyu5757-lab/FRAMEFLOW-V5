@@ -61,7 +61,12 @@ def create_runtime_persistence(
         "on",
     }
     store = open_runtime_store(database_path, candidate=not production_enabled)
-    return RuntimePersistence(store, legacy_path=Path(legacy_path) if legacy_path else None)
+    try:
+        return RuntimePersistence(store, legacy_path=Path(legacy_path) if legacy_path else None)
+    except Exception:
+        # A failed facade construction must not strand the factory-owned pool.
+        store.dispose()
+        raise
 
 
 def shutdown_runtime_persistence(persistence: RuntimePersistence | None) -> None:

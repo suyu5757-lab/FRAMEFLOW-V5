@@ -217,12 +217,18 @@ class T02RuntimeMigrationTests(unittest.TestCase):
         upgrade_candidate(candidate)
         first = validate_candidate(candidate)
         self.assertEqual([], first["errors"])
-        with sqlite3.connect(candidate) as connection:
+        connection = sqlite3.connect(candidate)
+        try:
             self.assertEqual([("20260826_01",)], connection.execute("SELECT version_num FROM alembic_version").fetchall())
+        finally:
+            connection.close()
         downgrade_candidate(candidate)
-        with sqlite3.connect(candidate) as connection:
+        connection = sqlite3.connect(candidate)
+        try:
             self.assertEqual([], connection.execute("SELECT version_num FROM alembic_version").fetchall())
             self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT IN ('alembic_version','sqlite_sequence')").fetchone()[0])
+        finally:
+            connection.close()
         upgrade_candidate(candidate)
         self.assertEqual([], validate_candidate(candidate)["errors"])
 
@@ -235,12 +241,18 @@ class T02RuntimeMigrationTests(unittest.TestCase):
         self.assertEqual("ok", metadata["integrity_check"])
         self.assertEqual(metadata["backup_sha256"], verify_backup(backup)["backup_sha256"])
         restore_backup(backup, restored)
-        with sqlite3.connect(restored) as connection:
+        connection = sqlite3.connect(restored)
+        try:
             connection.execute("UPDATE projects SET name='mutated copy' WHERE id='PRJ001'")
             connection.commit()
+        finally:
+            connection.close()
         restore_backup(backup, restored)
-        with sqlite3.connect(restored) as connection:
+        connection = sqlite3.connect(restored)
+        try:
             self.assertEqual("Legacy Project", connection.execute("SELECT name FROM projects WHERE id='PRJ001'").fetchone()[0])
+        finally:
+            connection.close()
         with self.assertRaises(BackupError):
             create_backup(source, PRODUCTION_DATABASE)
         with self.assertRaises(BackupError):
@@ -266,14 +278,18 @@ class T02RuntimeMigrationTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             migrate_v3_to_v5(source, candidate, backup_path=backup, strict=True)
         self.assertEqual(before, sha256(source))
-        with sqlite3.connect(candidate) as connection:
+        connection = sqlite3.connect(candidate)
+        try:
             self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0])
             self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM shots").fetchone()[0])
+        finally:
+            connection.close()
 
     def test_bad_fk_and_schema_drift_are_detected(self) -> None:
         candidate = unique_path("failure-validation")
         upgrade_candidate(candidate)
-        with sqlite3.connect(candidate) as connection:
+        connection = sqlite3.connect(candidate)
+        try:
             connection.execute("PRAGMA foreign_keys=ON")
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(
@@ -282,6 +298,8 @@ class T02RuntimeMigrationTests(unittest.TestCase):
                 )
             connection.execute("ALTER TABLE projects ADD COLUMN drift TEXT")
             connection.commit()
+        finally:
+            connection.close()
         self.assertTrue(validate_candidate(candidate)["errors"])
 
     def test_corrupt_source_and_production_candidate_abort(self) -> None:

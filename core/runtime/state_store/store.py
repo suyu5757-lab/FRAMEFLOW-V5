@@ -75,7 +75,11 @@ class StateStore:
         )
         event.listen(self.engine, "connect", self._configure_connection)
         if initialize:
-            self.initialize()
+            try:
+                self.initialize()
+            except Exception:
+                self.dispose()
+                raise
 
     @staticmethod
     def _configure_connection(dbapi_connection: Any, _connection_record: Any) -> None:

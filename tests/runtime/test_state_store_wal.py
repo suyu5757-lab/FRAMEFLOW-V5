@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-import tempfile
+import os
 import threading
 import time
 from pathlib import Path
 from unittest import TestCase
+from uuid import uuid4
 
 from sqlalchemy import insert
 from sqlalchemy.exc import IntegrityError
@@ -16,13 +17,13 @@ from core.schemas.runtime_mvp import RUNTIME_TABLE_NAMES, metadata, projects
 
 class StateStoreWalTests(TestCase):
     def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory(prefix="frameflow-state-store-")
-        self.database_path = Path(self.temp_dir.name) / "state.db"
+        self.temp_dir = Path(os.environ["FRAMEFLOW_TEST_TMP"]) / f"state-store-{uuid4().hex}"
+        self.temp_dir.mkdir(parents=True, exist_ok=False)
+        self.database_path = self.temp_dir / "state.db"
         self.store = StateStore(self.database_path, initialize=True)
 
     def tearDown(self) -> None:
         self.store.close()
-        self.temp_dir.cleanup()
 
     def test_wal_foreign_keys_and_busy_timeout_are_enabled(self) -> None:
         pragmas = self.store.pragmas()

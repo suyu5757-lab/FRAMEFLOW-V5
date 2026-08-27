@@ -25,10 +25,16 @@ def _read_only(path: Path | str) -> sqlite3.Connection:
     # Candidate validation must see a just-created WAL if migration has not
     # checkpointed it yet.  The connection is always closed in validate_candidate's
     # finally block; final swap additionally requires a real rename probe.
-    connection = sqlite3.connect(f"file:{candidate.as_posix()}?mode=ro", uri=True)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys=ON")
-    return connection
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(f"file:{candidate.as_posix()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        return connection
+    except Exception:
+        if connection is not None:
+            connection.close()
+        raise
 
 
 def _quote(identifier: str) -> str:

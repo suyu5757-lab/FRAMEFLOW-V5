@@ -52,15 +52,23 @@ def _resolve(path: Path | str | None) -> Path:
 def _read_only(path: Path) -> sqlite3.Connection:
     if not path.is_file():
         raise RuntimeOwnershipError(f"runtime database does not exist: {path}")
+    connection: sqlite3.Connection | None = None
     try:
         # ``immutable=1`` keeps inspection of a stopped legacy database from
-        # creating ``-wal``/``-shm`` sidecars.  Cutover must be able to prove
-        # those sidecars are absent immediately before the atomic swap.
+        # creating ``-wal``/``-shm`` sidecars.  If a live WAL is already
+        # present, a normal read-only connection is required to see its
+        # schema/data; this is used by runtime health checks while a store is
+        # still open.
+        query = "mode=ro"
+        if not Path(f"{path}-wal").exists():
+            query += "&immutable=1"
         connection = sqlite3.connect(
-            f"file:{path.as_posix()}?mode=ro&immutable=1", uri=True
+            f"file:{path.as_posix()}?{query}", uri=True
         )
         connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
     except sqlite3.DatabaseError as exc:
+        if connection is not None:
+            connection.close()
         raise RuntimeOwnershipError(f"runtime database is not readable: {path}") from exc
     connection.row_factory = sqlite3.Row
     return connection
@@ -156,12 +164,15 @@ def open_runtime_store(
                 f"refusing writable V5 ownership for {info['schema']} database: {resolved}"
             )
         store = StateStore(resolved, initialize=False)
-    pragmas = store.pragmas()
-    if pragmas != {"journal_mode": "wal", "foreign_keys": 1, "busy_timeout": 5000}:
-        store.close()
-        raise RuntimeOwnershipError(
-            f"V5 runtime PRAGMA gate failed for {resolved}: {pragmas}"
-        )
+    try:
+        pragmas = store.pragmas()
+        if pragmas != {"journal_mode": "wal", "foreign_keys": 1, "busy_timeout": 5000}:
+            raise RuntimeOwnershipError(
+                f"V5 runtime PRAGMA gate failed for {resolved}: {pragmas}"
+            )
+    except Exception:
+        store.dispose()
+        raise
     return store
 
 

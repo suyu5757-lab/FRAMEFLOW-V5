@@ -45,11 +45,14 @@ class T03RuntimeOwnershipTests(unittest.TestCase):
         path = Path(tempfile.gettempdir()) / "frameflow-t03-legacy-guard.db"
         if path.exists():
             path.unlink()
-        with sqlite3.connect(path) as connection:
+        connection = sqlite3.connect(path)
+        try:
             connection.executescript(
                 "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT);"
                 "CREATE TABLE projects(id TEXT PRIMARY KEY, name TEXT);"
             )
+        finally:
+            connection.close()
         self.assertEqual("LEGACY_V3", inspect_database(path)["schema"])
         with self.assertRaises(RuntimeOwnershipError):
             open_runtime_store(path, candidate=True)

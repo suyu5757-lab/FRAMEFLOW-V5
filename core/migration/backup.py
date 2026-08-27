@@ -46,11 +46,17 @@ def _sha256(path: Path) -> str:
 def _read_only(path: Path) -> sqlite3.Connection:
     if not path.is_file():
         raise BackupError(f"SQLite source does not exist: {path}")
-    connection = sqlite3.connect(
-        f"file:{path.as_posix()}?mode=ro&immutable=1", uri=True
-    )
-    connection.row_factory = sqlite3.Row
-    return connection
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(
+            f"file:{path.as_posix()}?mode=ro&immutable=1", uri=True
+        )
+        connection.row_factory = sqlite3.Row
+        return connection
+    except Exception:
+        if connection is not None:
+            connection.close()
+        raise
 
 
 def _table_names(connection: sqlite3.Connection) -> list[str]:
@@ -119,12 +125,14 @@ def create_backup(source_path: Path | str, backup_path: Path | str) -> dict[str,
     backup.parent.mkdir(parents=True, exist_ok=True)
     source_sha_before = _sha256(source)
     source_connection = _read_only(source)
-    destination = sqlite3.connect(backup)
+    destination: sqlite3.Connection | None = None
     try:
+        destination = sqlite3.connect(backup)
         source_connection.backup(destination, pages=256, sleep=0.05)
         destination.commit()
     finally:
-        destination.close()
+        if destination is not None:
+            destination.close()
         source_connection.close()
     source_sha_after = _sha256(source)
     if source_sha_before != source_sha_after:
@@ -163,12 +171,14 @@ def restore_backup(backup_path: Path | str, target_path: Path | str) -> dict[str
         raise BackupError("refusing to restore an invalid backup")
     target.parent.mkdir(parents=True, exist_ok=True)
     source_connection = _read_only(backup)
-    destination = sqlite3.connect(target)
+    destination: sqlite3.Connection | None = None
     try:
+        destination = sqlite3.connect(target)
         source_connection.backup(destination, pages=256, sleep=0.05)
         destination.commit()
     finally:
-        destination.close()
+        if destination is not None:
+            destination.close()
         source_connection.close()
     restored = verify_backup(target)
     if restored["integrity_check"] != "ok" or restored["foreign_key_violations"]:

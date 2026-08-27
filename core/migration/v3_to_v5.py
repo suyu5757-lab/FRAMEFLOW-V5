@@ -673,12 +673,14 @@ def migrate_v3_to_v5(
         manifest["backup"] = create_backup(source, backup)
         migration_source = backup
         upgrade_candidate(candidate)
-        legacy = _read_only(migration_source)
-        target = sqlite3.connect(candidate)
-        target.execute("PRAGMA foreign_keys=ON")
-        target.execute("PRAGMA busy_timeout=5000")
-        warnings: list[str] = []
+        legacy: sqlite3.Connection | None = None
+        target: sqlite3.Connection | None = None
         try:
+            legacy = _read_only(migration_source)
+            target = sqlite3.connect(candidate)
+            target.execute("PRAGMA foreign_keys=ON")
+            target.execute("PRAGMA busy_timeout=5000")
+            warnings: list[str] = []
             project_ids: set[str] = set()
             for row in _rows(legacy, "projects"):
                 try:
@@ -704,12 +706,15 @@ def migrate_v3_to_v5(
             _derive_events(legacy, target, accounting)
             target.commit()
         except Exception as exc:
-            target.rollback()
+            if target is not None:
+                target.rollback()
             manifest["errors"].append(str(exc))
             raise
         finally:
-            target.close()
-            legacy.close()
+            if target is not None:
+                target.close()
+            if legacy is not None:
+                legacy.close()
         _archive_non_runtime_tables(accounting)
         manifest["warnings"] = warnings
         manifest["candidate"] = assert_candidate_valid(candidate)

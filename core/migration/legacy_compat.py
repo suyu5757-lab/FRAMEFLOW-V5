@@ -59,6 +59,7 @@ class LegacyReadOnlyCompatibility:
             raise LegacyReadOnlyError(f"legacy archive does not exist: {self.path}")
 
     def _connection(self) -> sqlite3.Connection:
+        connection: sqlite3.Connection | None = None
         try:
             connection = sqlite3.connect(
                 f"file:{self.path.as_posix()}?mode=ro&immutable=1", uri=True, timeout=5
@@ -68,6 +69,8 @@ class LegacyReadOnlyCompatibility:
             connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
             return connection
         except sqlite3.DatabaseError as exc:
+            if connection is not None:
+                connection.close()
             raise LegacyReadOnlyError(f"legacy archive is not readable: {self.path}") from exc
 
     @contextmanager
