@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+import os
+import shutil
+from pathlib import Path
+from unittest.mock import patch
+from uuid import uuid4
+
+import pytest
+
+from core.migration.cutover import fresh_candidate_from_production, perform_production_cutover
+from core.runtime.persistence import RuntimeStartupConfig, write_runtime_startup_config
+from core.runtime.state_store.factory import inspect_database
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PRODUCTION_DATABASE = PROJECT_ROOT / "data" / "frameflow.db"
+
+
+def _cutover_fixture() -> tuple[Path, Path, Path, Path]:
+    root = Path(os.environ["FRAMEFLOW_TEST_TMP"]) / f"runtime-cutover-{uuid4().hex}"
+    root.mkdir(parents=True, exist_ok=False)
+    migrated = fresh_candidate_from_production(
+        source=PRODUCTION_DATABASE,
+        work_dir=root / "migration",
+        run_id="runtime-config-cutover-test",
+    )
+    candidate = Path(migrated["candidate_path"])
+    archive = Path(migrated["backup_path"])
+    canonical = root / "canonical.db"
+    shutil.copy2(archive, canonical)
+    return root, canonical, candidate, archive
+
+
+def test_authorized_cutover_persists_explicit_restart_safe_v5_configuration() -> None:
+    root, canonical, candidate, archive = _cutover_fixture()
+    config_path = root / "runtime-startup.json"
+    with patch("core.migration.cutover.CANONICAL_DATABASE_PATH", canonical):
+        result = perform_production_cutover(
+            candidate,
+            legacy_archive=archive,
+            legacy_source=canonical,
+            production_cutover=True,
+            no_active_writer=lambda: True,
+            candidate_handle_free=True,
+            legacy_archive_verified=True,
+            runtime_config_path=config_path,
+            cutover_run_id="cutover-config-test",
+        )
+
+    config = RuntimeStartupConfig.read(config_path)
+    assert config.runtime_mode == "v5"
+    assert config.runtime_db == str(canonical.resolve())
+    assert config.legacy_readonly_db == str(archive.resolve())
+    assert config.production is True
+    assert config.cutover_run_id == "cutover-config-test"
+    assert result["runtime_config"] == str(config_path.resolve())
+    assert inspect_database(canonical)["schema"] == "V5_RUNTIME"
+    assert inspect_database(archive)["schema"] == "LEGACY_V3"
+
+
+def test_failed_replacement_restores_the_prior_runtime_configuration() -> None:
+    root, canonical, candidate, archive = _cutover_fixture()
+    config_path = root / "runtime-startup.json"
+    prior = RuntimeStartupConfig.build(
+        runtime_mode="legacy",
+        runtime_db=canonical,
+        legacy_readonly_db=None,
+        production=False,
+        generated_by="test-prior-legacy-runtime",
+    )
+    write_runtime_startup_config(prior, config_path)
+    original_replace = os.replace
+
+    def fail_candidate_replace(source: Path | str, destination: Path | str) -> None:
+        if Path(source).resolve() == candidate.resolve() and Path(destination).resolve() == canonical.resolve():
+            raise PermissionError("injected candidate replacement failure")
+        original_replace(source, destination)
+
+    with patch("core.migration.cutover.CANONICAL_DATABASE_PATH", canonical), patch(
+        "core.migration.cutover.os.replace", side_effect=fail_candidate_replace
+    ):
+        with pytest.raises(PermissionError, match="injected candidate replacement failure"):
+            perform_production_cutover(
+                candidate,
+                legacy_archive=archive,
+                legacy_source=canonical,
+                production_cutover=True,
+                no_active_writer=lambda: True,
+                candidate_handle_free=True,
+                legacy_archive_verified=True,
+                runtime_config_path=config_path,
+                cutover_run_id="failed-cutover-config-test",
+            )
+
+    restored = RuntimeStartupConfig.read(config_path)
+    assert restored == prior
+    assert inspect_database(canonical)["schema"] == "LEGACY_V3"
+    assert inspect_database(candidate)["schema"] == "V5_RUNTIME"

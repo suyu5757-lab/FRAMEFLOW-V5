@@ -27,6 +27,9 @@ LEGACY_READ_ONLY_COMPAT = "LEGACY_READ_ONLY_COMPAT"
 MIGRATE_TO_V5 = "MIGRATE_TO_V5"
 PROVEN_ARCHIVE_ONLY = "PROVEN_ARCHIVE_ONLY"
 UNACCOUNTED = "UNACCOUNTED"
+EXPECTED_LEGACY_SCHEMA_VERSION = 16
+REQUIRED_LEGACY_TABLES = frozenset({"projects", "schema_migrations"})
+REQUIRED_PROJECT_COLUMNS = frozenset({"id", "document_json"})
 
 
 class LegacyReadOnlyError(RuntimeError):
@@ -57,6 +60,7 @@ class LegacyReadOnlyCompatibility:
         self.path = Path(path).expanduser().resolve(strict=False)
         if not self.path.is_file():
             raise LegacyReadOnlyError(f"legacy archive does not exist: {self.path}")
+        self.validation = inspect_legacy_archive(self.path)
 
     def _connection(self) -> sqlite3.Connection:
         connection: sqlite3.Connection | None = None
@@ -137,6 +141,73 @@ class LegacyReadOnlyCompatibility:
         return None
 
 
+def inspect_legacy_archive(path: Path | str) -> dict[str, Any]:
+    """Fail closed unless *path* is a healthy FRAMEFLOW Legacy V3 archive."""
+
+    resolved = Path(path).expanduser().resolve(strict=False)
+    if not resolved.is_file():
+        raise LegacyReadOnlyError(f"legacy archive does not exist: {resolved}")
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(
+            f"file:{resolved.as_posix()}?mode=ro&immutable=1", uri=True, timeout=5
+        )
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        missing_tables = sorted(REQUIRED_LEGACY_TABLES - tables)
+        if missing_tables:
+            raise LegacyReadOnlyError(
+                f"legacy archive schema is missing required tables {missing_tables}: {resolved}"
+            )
+        project_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(projects)").fetchall()
+        }
+        missing_columns = sorted(REQUIRED_PROJECT_COLUMNS - project_columns)
+        if missing_columns:
+            raise LegacyReadOnlyError(
+                f"legacy projects schema is missing required columns {missing_columns}: {resolved}"
+            )
+        schema_version_row = connection.execute(
+            "SELECT MAX(version) FROM schema_migrations"
+        ).fetchone()
+        schema_version = int(schema_version_row[0]) if schema_version_row and schema_version_row[0] is not None else None
+        if schema_version != EXPECTED_LEGACY_SCHEMA_VERSION:
+            raise LegacyReadOnlyError(
+                "legacy archive schema version mismatch: "
+                f"expected={EXPECTED_LEGACY_SCHEMA_VERSION} actual={schema_version} path={resolved}"
+            )
+        integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+        if integrity.lower() != "ok":
+            raise LegacyReadOnlyError(
+                f"legacy archive integrity check failed ({integrity}): {resolved}"
+            )
+        foreign_key_violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if foreign_key_violations:
+            raise LegacyReadOnlyError(
+                f"legacy archive foreign-key check failed: {resolved}"
+            )
+        return {
+            "path": str(resolved),
+            "schema": "LEGACY_V3",
+            "schema_version": schema_version,
+            "table_count": len(tables),
+            "integrity_check": integrity,
+            "foreign_key_violations": 0,
+            "connection_mode": "ro",
+        }
+    except LegacyReadOnlyError:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise LegacyReadOnlyError(f"legacy archive is not valid SQLite: {resolved}") from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def account_legacy_shots(
     path: Path | str, shot_ids: list[str] | tuple[str, ...]
 ) -> dict[str, Any]:
@@ -200,4 +271,5 @@ __all__ = [
     "LegacyReadOnlyCompatibility",
     "LegacyReadOnlyError",
     "account_legacy_shots",
+    "inspect_legacy_archive",
 ]

@@ -40,11 +40,12 @@ from frameflow.v3 import assemble_approved_timeline, default_graph, ensure_graph
 from frameflow.workflows import WORKFLOWS, evaluate_project_gates, workflow_manifest
 from frameflow.story import story_checks, story_document
 from frameflow.upload_storage import UploadTooLarge, cleanup_file, cleanup_staged_upload, finalize_staged_upload, stage_upload
-from core.runtime.persistence import RuntimeModeError, RuntimePersistence, RuntimePersistenceError, create_runtime_persistence, resolve_runtime_mode
+from core.runtime.persistence import RuntimeModeError, RuntimePersistence, RuntimePersistenceError, create_runtime_persistence, resolve_runtime_environment, resolve_runtime_mode
 
 ROOT=Path(__file__).resolve().parent; DATA_DIR=ROOT/"data"; DEFAULT_DATA_DIR=DATA_DIR; GENERATED_DIR=ROOT/"generated"; STUDIO_DIST=ROOT/"web"/"dist"; GENERATED_AUDIO_DIR=GENERATED_DIR/"audio"; REFERENCE_AUDIO_DIR=GENERATED_AUDIO_DIR/"references"
-DB_PATH=Path(os.environ.get("FRAMEFLOW_DB_PATH", DATA_DIR/"frameflow.db")); os.environ.setdefault("JIMENG_CLI_HOME", str(DATA_DIR/"dreamina-home")); MAX_UPLOAD=1024**3; MAX_AUDIO_UPLOAD=25*1024**2
-RUNTIME_MODE=resolve_runtime_mode()
+RUNTIME_ENVIRONMENT=resolve_runtime_environment()
+DB_PATH=Path(RUNTIME_ENVIRONMENT.get("FRAMEFLOW_DB_PATH", DATA_DIR/"frameflow.db")); os.environ.setdefault("JIMENG_CLI_HOME", str(DATA_DIR/"dreamina-home")); MAX_UPLOAD=1024**3; MAX_AUDIO_UPLOAD=25*1024**2
+RUNTIME_MODE=resolve_runtime_mode(RUNTIME_ENVIRONMENT)
 DEFAULT_BIND_HOST="127.0.0.1"; DEFAULT_BIND_PORT=8787; LOOPBACK_BIND_HOSTS={"127.0.0.1","localhost","::1"}
 STATIC_FILES={"/":"web/dist/index.html","/index.html":"web/dist/index.html"}
 ALLOWED_TTS_MODELS={"gpt-4o-mini-tts","gpt-4o-mini-tts-2025-12-15"}; ALLOWED_TTS_VOICES={"alloy","ash","ballad","coral","echo","fable","onyx","nova","sage","shimmer","verse","marin","cedar"}
@@ -194,7 +195,7 @@ async def lifespan(application:FastAPI):
     ensure_loopback_bind(requested_bind_host())
     if RUNTIME_MODE == "v5":
         try:
-            runtime = create_runtime_persistence()
+            runtime = create_runtime_persistence(environment=RUNTIME_ENVIRONMENT)
         except RuntimeModeError:
             raise
         application.state.runtime_mode = "v5"

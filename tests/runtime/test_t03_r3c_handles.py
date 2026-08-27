@@ -15,6 +15,7 @@ from core.runtime.state_store.factory import open_runtime_store
 
 
 TEST_ROOT = Path(r"D:\11067\CodexWorkspaces\frameflow-v3\data\.cutover\r3c-tests")
+PRODUCTION_DATABASE = Path(__file__).resolve().parents[2] / "data" / "frameflow.db"
 
 
 def _test_candidate(label: str) -> Path:
@@ -82,6 +83,7 @@ def test_h2_v5_backend_wait_exit_then_real_rename_probe(free_tcp_port: int) -> N
             "FRAMEFLOW_RUNTIME_MODE": "v5",
             "FRAMEFLOW_V5_DB": str(candidate),
             "FRAMEFLOW_V5_PRODUCTION": "0",
+            "FRAMEFLOW_LEGACY_READONLY_DB": str(PRODUCTION_DATABASE),
         }
     )
     proc = subprocess.Popen(
@@ -110,6 +112,7 @@ def test_h3_runtime_persistence_dispose_then_real_rename_probe() -> None:
             "FRAMEFLOW_RUNTIME_MODE": "v5",
             "FRAMEFLOW_V5_DB": str(candidate),
             "FRAMEFLOW_V5_PRODUCTION": "0",
+            "FRAMEFLOW_LEGACY_READONLY_DB": str(PRODUCTION_DATABASE),
         }
     )
     persistence.dispose()

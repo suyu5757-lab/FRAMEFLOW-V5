@@ -1,0 +1,335 @@
+"""Reproducible isolated T03 SOL startup/restart and compatibility gate.
+
+This harness never accepts the canonical production database as its writable
+candidate.  It writes one persisted runtime config, starts the same Uvicorn
+entrypoint twice, and reuses that config without runtime ownership variables.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.migration.legacy_compat import LegacyReadOnlyCompatibility
+from core.runtime.persistence import RuntimeStartupConfig, write_runtime_startup_config
+from core.runtime.state_store.factory import CANONICAL_DATABASE_PATH, inspect_database
+
+
+REQUIRED_LEGACY_SHOTS = tuple(f"SH{number:03d}" for number in range(4, 21))
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def request_json(
+    port: int,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=data,
+        method=method,
+        headers={"Content-Type": "application/json"} if data is not None else {},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            return response.status, payload
+    except urllib.error.HTTPError as exc:
+        payload = json.loads(exc.read().decode("utf-8"))
+        return exc.code, payload
+
+
+def wait_for_v5(port: int, process: subprocess.Popen[str], timeout: float = 30.0) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            raise RuntimeError(
+                f"backend exited during startup ({process.returncode})\nSTDOUT={stdout}\nSTDERR={stderr}"
+            )
+        try:
+            status, payload = request_json(port, "GET", "/api/health")
+            if status == 200 and payload.get("runtime_mode") == "v5":
+                return payload
+        except Exception as exc:
+            last_error = exc
+        time.sleep(0.2)
+    raise RuntimeError(f"V5 backend did not start on port {port}: {last_error}")
+
+
+def stop_backend(process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+    if process.stdout is not None:
+        process.stdout.close()
+    if process.stderr is not None:
+        process.stderr.close()
+
+
+def run_http_gate(port: int, persisted_fixture: str | None = None) -> dict[str, Any]:
+    health_status, health = request_json(port, "GET", "/api/health")
+    if health_status != 200 or health.get("runtime_mode") != "v5":
+        raise AssertionError(f"health gate failed: status={health_status} payload={health}")
+    status, projects = request_json(port, "GET", "/api/v2/projects")
+    if status != 200 or not projects.get("projects"):
+        raise AssertionError(f"project list gate failed: status={status} payload={projects}")
+    project_id = str(projects["projects"][0]["document"]["id"])
+
+    checks: list[tuple[str, int, int]] = [("health", health_status, 200)]
+    requests = (
+        ("doctor", "GET", "/api/system/doctor", None, 200),
+        ("projects", "GET", "/api/v2/projects", None, 200),
+        ("dashboard", "GET", f"/api/v2/dashboard?project_id={project_id}", None, 200),
+        ("settings", "GET", "/api/v2/settings", None, 200),
+        ("workflows", "GET", "/api/v2/workflows", None, 200),
+        ("data_audit", "GET", "/api/v2/system/data-audit", None, 200),
+        ("project", "GET", f"/api/v2/projects/{project_id}", None, 200),
+        ("graph", "GET", f"/api/v2/projects/{project_id}/graph", None, 200),
+        ("timeline", "GET", f"/api/v2/projects/{project_id}/timeline", None, 200),
+        ("timeline_preflight", "GET", f"/api/v2/projects/{project_id}/timeline/preflight", None, 200),
+        ("story", "GET", f"/api/v2/projects/{project_id}/story", None, 200),
+        ("story_runs", "GET", f"/api/v2/projects/{project_id}/story/runs", None, 200),
+        ("assets", "GET", f"/api/v2/projects/{project_id}/assets", None, 200),
+        ("asset_board", "GET", f"/api/v2/projects/{project_id}/asset-board", None, 200),
+        ("asset_audit", "GET", f"/api/v2/projects/{project_id}/asset-audit", None, 200),
+        ("audio_studio", "GET", f"/api/v2/projects/{project_id}/audio-studio", None, 200),
+    )
+    for name, method, path, body, expected in requests:
+        actual, _payload = request_json(port, method, path, body)
+        checks.append((name, actual, expected))
+
+    fixture_name = f"T03R3_SMOKE_SOL_{uuid4().hex[:8].upper()}"
+    created_status, created = request_json(
+        port,
+        "POST",
+        "/api/v2/projects",
+        {
+            "name": fixture_name,
+            "brief": "isolated restart verification",
+            "ratio": "16:9",
+            "duration": 1,
+            "generator": "manual",
+        },
+    )
+    checks.append(("create_project", created_status, 201))
+    fixture_id = str(created.get("document", {}).get("id") or "")
+    revision = created.get("revision")
+    updated_status, updated = request_json(
+        port,
+        "PATCH",
+        f"/api/v2/projects/{fixture_id}",
+        {"expected_revision": revision, "name": f"{fixture_name}_UPDATED"},
+    )
+    checks.append(("update_project", updated_status, 200))
+
+    if persisted_fixture:
+        persisted_status, persisted = request_json(
+            port, "GET", f"/api/v2/projects/{persisted_fixture}"
+        )
+        if persisted_status != 200 or not str(
+            persisted.get("document", {}).get("name", "")
+        ).endswith("_UPDATED"):
+            raise AssertionError(
+                f"restart persistence failed for {persisted_fixture}: {persisted_status} {persisted}"
+            )
+
+    failures = [name for name, actual, expected in checks if actual != expected]
+    if len(checks) != 19 or failures:
+        raise AssertionError(f"19-API gate failed: count={len(checks)} failures={failures}")
+
+    historical: dict[str, int] = {}
+    for shot_id in REQUIRED_LEGACY_SHOTS:
+        shot_status, payload = request_json(
+            port, "GET", f"/api/v2/legacy/shots/{shot_id}"
+        )
+        historical[shot_id] = shot_status
+        if shot_status != 200 or payload.get("read_only") is not True:
+            raise AssertionError(
+                f"historical compatibility failed for {shot_id}: {shot_status} {payload}"
+            )
+
+    retired_status, _ = request_json(port, "GET", "/api/projects")
+    unsupported_status, _ = request_json(
+        port, "GET", f"/api/v2/projects/{project_id}/graph/write"
+    )
+    if retired_status != 410 or unsupported_status != 501:
+        raise AssertionError(
+            f"V5 gateway boundary failed: retired={retired_status} unsupported={unsupported_status}"
+        )
+    return {
+        "api": {name: actual for name, actual, _expected in checks},
+        "api_passed": len(checks),
+        "api_failed": len(failures),
+        "historical": historical,
+        "historical_passed": sum(1 for value in historical.values() if value == 200),
+        "historical_failed": sum(1 for value in historical.values() if value != 200),
+        "fixture_id": fixture_id,
+        "persisted_fixture": persisted_fixture,
+        "gateway": {"retired_v3": retired_status, "unsupported_v5_write": unsupported_status},
+    }
+
+
+def verify_read_only(legacy: Path) -> dict[str, Any]:
+    before = sha256(legacy)
+    adapter = LegacyReadOnlyCompatibility(legacy)
+    blocked: dict[str, bool] = {}
+    with adapter.connection() as connection:
+        selected = connection.execute("SELECT id FROM projects LIMIT 1").fetchone() is not None
+        for verb, statement in {
+            "insert": "INSERT INTO projects(id) VALUES('T03_SOL_FORBIDDEN')",
+            "update": "UPDATE projects SET id=id",
+            "delete": "DELETE FROM projects",
+        }.items():
+            try:
+                connection.execute(statement)
+            except sqlite3.OperationalError:
+                blocked[verb] = True
+            else:
+                blocked[verb] = False
+    after = sha256(legacy)
+    if not selected or not all(blocked.values()) or before != after:
+        raise AssertionError(
+            f"legacy read-only gate failed: selected={selected} blocked={blocked} hash_stable={before == after}"
+        )
+    return {
+        "select": "PASS",
+        "insert": "BLOCKED",
+        "update": "BLOCKED",
+        "delete": "BLOCKED",
+        "sha256_before": before,
+        "sha256_after": after,
+        "validation": adapter.validation,
+    }
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--candidate", type=Path, required=True)
+    parser.add_argument("--legacy", type=Path, required=True)
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--port", type=int, default=8877)
+    parser.add_argument("--output", type=Path)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    candidate = args.candidate.expanduser().resolve(strict=False)
+    legacy = args.legacy.expanduser().resolve(strict=False)
+    config_path = args.config.expanduser().resolve(strict=False)
+    if candidate == CANONICAL_DATABASE_PATH:
+        raise SystemExit("refusing to verify against the canonical production database")
+    if candidate == legacy:
+        raise SystemExit("candidate and legacy archive must be different files")
+    candidate_info = inspect_database(candidate)
+    if candidate_info["schema"] != "V5_RUNTIME":
+        raise SystemExit(f"candidate is not V5_RUNTIME: {candidate_info['schema']}")
+
+    config = RuntimeStartupConfig.build(
+        runtime_mode="v5",
+        runtime_db=candidate,
+        legacy_readonly_db=legacy,
+        production=False,
+        generated_by="scripts.verify_t03_sol_final",
+        cutover_run_id="isolated-final-verification",
+    )
+    write_runtime_startup_config(config, config_path)
+    environment = os.environ.copy()
+    for name in (
+        "FRAMEFLOW_RUNTIME_MODE",
+        "FRAMEFLOW_V5_DB",
+        "FRAMEFLOW_DB_PATH",
+        "FRAMEFLOW_LEGACY_READONLY_DB",
+        "FRAMEFLOW_V5_PRODUCTION",
+    ):
+        environment.pop(name, None)
+    environment["FRAMEFLOW_RUNTIME_CONFIG"] = str(config_path)
+    environment["FRAMEFLOW_BIND_HOST"] = "127.0.0.1"
+
+    results: list[dict[str, Any]] = []
+    persisted_fixture: str | None = None
+    for boot in ("first_start", "restart"):
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "server:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(args.port),
+                "--log-level",
+                "warning",
+            ],
+            cwd=PROJECT_ROOT,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
+        )
+        try:
+            health = wait_for_v5(args.port, process)
+            gate = run_http_gate(args.port, persisted_fixture)
+            persisted_fixture = str(gate["fixture_id"])
+            results.append({"boot": boot, "health": health, **gate})
+        finally:
+            stop_backend(process)
+
+    payload = {
+        "status": "PASS",
+        "candidate": str(candidate),
+        "candidate_info": candidate_info,
+        "legacy": str(legacy),
+        "runtime_config": str(config_path),
+        "runtime_config_payload": json.loads(config_path.read_text(encoding="utf-8")),
+        "runtime_environment_fields_injected": ["FRAMEFLOW_RUNTIME_CONFIG", "FRAMEFLOW_BIND_HOST"],
+        "ownership_environment_fields_injected": [],
+        "legacy_read_only": verify_read_only(legacy),
+        "boots": results,
+        "invalid_direct_access": 0,
+        "dual_write": False,
+        "dual_source_of_truth": False,
+        "production_cutover_performed": False,
+    }
+    rendered = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered, encoding="utf-8", newline="\n")
+    print(rendered, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

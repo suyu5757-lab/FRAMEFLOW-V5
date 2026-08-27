@@ -25,9 +25,15 @@ from core.runtime.state_store.factory import (
     inspect_database,
     open_runtime_store,
 )
+from core.runtime.persistence.startup_config import (
+    DEFAULT_RUNTIME_CONFIG_PATH,
+    RuntimeStartupConfig,
+    RuntimeStartupConfigError,
+    write_runtime_startup_config,
+)
 
 from .backup import create_backup, write_manifest
-from .legacy_compat import account_legacy_shots
+from .legacy_compat import account_legacy_shots, inspect_legacy_archive
 from .v3_to_v5 import migrate_v3_to_v5
 from .validation import validate_candidate
 
@@ -305,6 +311,8 @@ def perform_production_cutover(
     no_active_writer: Callable[[], bool] | None = None,
     candidate_handle_free: bool = False,
     legacy_archive_verified: bool = False,
+    runtime_config_path: Path | str = DEFAULT_RUNTIME_CONFIG_PATH,
+    cutover_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Atomically place a verified candidate, only with explicit authorization.
 
@@ -338,6 +346,12 @@ def perform_production_cutover(
         raise CutoverBlocked(
             f"verified rollback archive is missing before replacement: {archive_path}"
         )
+    try:
+        legacy_validation = inspect_legacy_archive(
+            archive_path if archive_precreated else source_path
+        )
+    except Exception as exc:
+        raise CutoverBlocked(f"legacy archive validation failed: {exc}") from exc
     if no_active_writer is None or not no_active_writer():
         raise CutoverBlocked("no_active_writer proof is required before production replacement")
     if not candidate_path.is_file():
@@ -356,18 +370,43 @@ def perform_production_cutover(
         "mtime_ns": source_path.stat().st_mtime_ns,
         "sha256": _sha256(source_path),
     }
+    config_path = Path(runtime_config_path).expanduser().resolve(strict=False)
+    prior_config = None
+    if config_path.is_file():
+        try:
+            prior_config = RuntimeStartupConfig.read(config_path)
+        except RuntimeStartupConfigError as exc:
+            raise CutoverBlocked(
+                f"existing runtime startup config is invalid: {config_path}: {exc}"
+            ) from exc
+    v5_config = RuntimeStartupConfig.build(
+        runtime_mode="v5",
+        runtime_db=source_path,
+        legacy_readonly_db=archive_path,
+        production=True,
+        generated_by="core.migration.cutover.perform_production_cutover",
+        cutover_run_id=cutover_run_id,
+    )
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     moved_source = False
-    if not archive_precreated:
-        shutil.move(str(source_path), str(archive_path))
-        moved_source = True
     try:
+        # Persist the fail-closed startup decision before the database move.
+        # A crash in the narrow interval can only make V5 startup reject the
+        # still-legacy canonical DB; it cannot reopen it through writable V3.
+        write_runtime_startup_config(v5_config, config_path)
+        if not archive_precreated:
+            shutil.move(str(source_path), str(archive_path))
+            moved_source = True
         os.replace(candidate_path, source_path)
     except Exception:
         # Restore only when this operation moved the original source away.
         # A pre-created verified archive remains intact for rollback review.
         if moved_source:
             os.replace(archive_path, source_path)
+        if prior_config is not None:
+            write_runtime_startup_config(prior_config, config_path)
+        elif config_path.is_file():
+            config_path.unlink()
         raise
     after = fingerprint_database(source_path)
     return {
@@ -376,6 +415,9 @@ def perform_production_cutover(
         "legacy_archive": str(archive_path),
         "path_info": path_info,
         "legacy_archive_precreated": archive_precreated,
+        "legacy_archive_validation": legacy_validation,
+        "runtime_config": str(config_path),
+        "runtime_config_payload": json.loads(v5_config.as_json()),
     }
 
 
