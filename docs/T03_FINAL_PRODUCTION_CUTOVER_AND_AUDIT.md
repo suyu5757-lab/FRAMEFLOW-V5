@@ -170,6 +170,76 @@ Runtime source of truth = LEGACY_V3
 READY FOR FINAL PRODUCTION CUTOVER = YES
 ```
 
+## Candidate B sidecar-free terminal seal closure — 2026-08-29
+
+The failed run `T03FINAL-20260828T155843Z-16fbdb3b` is preserved unchanged.
+Its Candidate B sidecar gate failed because final DB stabilization was omitted:
+`candidate-b.db-wal` was an empty 0-byte WAL and `candidate-b.db-shm` was a
+32 KiB persistence-only SHM. No uncheckpointed WAL frames or logical mutation
+were present. The proven root cause is `E + G`: checkpoint ordering defect plus
+orphan empty sidecars after clean close. No blind sidecar deletion was used.
+
+The closure is documented in
+`docs/T03_CANDIDATE_B_SIDECAR_FREE_SEAL_CLOSURE.md`. Candidate B now requires
+all DB-dependent evidence before `HANDLES_CLOSED`, then performs
+`wal_checkpoint(TRUNCATE)` and `journal_mode=DELETE` in the final stabilization
+window. It requires absent WAL/SHM and four stable filesystem samples before
+the terminal rename. After `SEALED`, the lifecycle rejects all Candidate B DB
+opens and keeps the post-seal DB-open count at zero. Production StateStore's
+WAL/foreign-key/busy-timeout contract is unchanged and is re-established on
+the first real runtime connection.
+
+Fresh isolated dry-run:
+
+```text
+Run = T03-B-SIDECAR-CLOSURE-20260828T162825Z-a484e32b
+Candidate B backend-opened = NO
+B0 complete before stabilization = YES
+Candidate B final stabilization = PASS
+Candidate B WAL/SHM absent before rename = YES/YES
+Candidate B stable samples = 4
+Candidate B handles closed = YES
+Candidate B rename = PASS
+Candidate B SEALED = YES
+Candidate B reopened after rename = NO
+Candidate B post-seal DB open count = 0
+Candidate B WAL/SHM absent at all post-seal watch points = YES/YES
+A0/B0 = PASS; UNKNOWN=0; UNACCOUNTED=0; SH004-SH020=17/17
+Archive = 5/5 readonly
+Runtime config THIS RUN = YES
+Maintenance freshness = PASS
+ALL PRE_SWAP GATES = PASS
+perform_production_cutover = NOT_CALLED
+Production DB touched = NO
+```
+
+Post-closure regression evidence:
+
+```text
+Focused = 98 passed
+Schema/migration/runtime = 140 passed
+V3 = 37 passed
+Post-cutover DB contract = 1 passed
+Git safety = 10 passed
+Full suite = 278 passed
+Failed = 0
+Errors = 0
+Blocked = 0
+```
+
+Independent Production audit remains Legacy V3: canonical path unchanged,
+41 tables, schema 16, integrity `ok`, zero FK violations, HTTP 200,
+`runtime_mode=legacy`, `status=ready`, `ready=true`, and
+`runtime-startup.json` absent. Production DB replacement and intentional
+migration were both `NO`; dual write and dual source remain `NO`.
+
+```text
+STATUS = PASS
+PRODUCTION CUTOVER = NOT_PERFORMED
+RUNTIME SOURCE OF TRUTH = LEGACY_V3
+READY FOR NEW FINAL PRODUCTION CUTOVER AUTHORIZATION = YES
+```
+
 ## Candidate B terminal seal closure — 2026-08-28
 
 The failed run `T03FINAL-20260828T151315Z-48f5ec56` is preserved as historical

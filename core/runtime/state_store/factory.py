@@ -118,6 +118,8 @@ def inspect_database(path: Path | str | None = None) -> dict[str, Any]:
             "journal_mode": connection.execute("PRAGMA journal_mode").fetchone()[0],
             "foreign_keys": connection.execute("PRAGMA foreign_keys").fetchone()[0],
             "busy_timeout": connection.execute("PRAGMA busy_timeout").fetchone()[0],
+            "page_count": connection.execute("PRAGMA page_count").fetchone()[0],
+            "freelist_count": connection.execute("PRAGMA freelist_count").fetchone()[0],
             "integrity_check": connection.execute("PRAGMA integrity_check").fetchone()[0],
             "foreign_key_violations": [
                 tuple(row) for row in connection.execute("PRAGMA foreign_key_check").fetchall()

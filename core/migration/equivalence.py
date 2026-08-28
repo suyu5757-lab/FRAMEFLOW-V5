@@ -806,12 +806,24 @@ def verify_final_candidate_gate(
         isinstance(terminal_seal, Mapping)
         and int(terminal_seal.get("candidate_b_post_seal_db_open_count") or 0) == 0
     )
+    final_stabilization = candidate_b0.get("final_db_stabilization")
+    checks["candidate_b_final_db_stabilization"] = (
+        isinstance(final_stabilization, Mapping)
+        and final_stabilization.get("passed") is True
+        and final_stabilization.get("checkpoint_passed") is True
+        and final_stabilization.get("journal_mode_after_stabilization") == "delete"
+        and final_stabilization.get("sidecars_absent") is True
+        and isinstance(final_stabilization.get("stable_samples"), list)
+        and len(final_stabilization.get("stable_samples") or []) >= 4
+    )
     if not checks["candidate_b_terminal_seal"]:
         errors.append("Candidate B terminal SEALED evidence is missing")
     if not checks["candidate_b_reopened_after_rename"]:
         errors.append("Candidate B was reopened after final rename")
     if not checks["candidate_b_post_seal_db_open_count"]:
         errors.append("Candidate B post-seal database open count is non-zero")
+    if not checks["candidate_b_final_db_stabilization"]:
+        errors.append("Candidate B sidecar-free final DB stabilization is missing")
 
     accounting = candidate_b0.get("row_accounting")
     if not isinstance(accounting, Mapping):

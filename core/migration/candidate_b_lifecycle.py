@@ -22,6 +22,7 @@ class CandidateBState(StrEnum):
     BUILDING = "BUILDING"
     VALIDATING = "VALIDATING"
     EVIDENCE_COMPLETE = "EVIDENCE_COMPLETE"
+    FINAL_DB_STABILIZATION = "FINAL_DB_STABILIZATION"
     HANDLES_CLOSED = "HANDLES_CLOSED"
     FINAL_RENAME_PROBE = "FINAL_RENAME_PROBE"
     SEALED = "SEALED"
@@ -57,6 +58,8 @@ class CandidateBTerminalSeal:
     post_seal_db_open_count: int = 0
     post_seal_db_open_attempts: int = 0
     evidence_complete_at: str | None = None
+    final_db_stabilization_at: str | None = None
+    final_db_stabilization: dict[str, Any] | None = None
     handles_closed_at: str | None = None
     rename_at: str | None = None
     sealed_at: str | None = None
@@ -131,10 +134,83 @@ class CandidateBTerminalSeal:
         self.state = CandidateBState.EVIDENCE_COMPLETE
         self.evidence_complete_at = _timestamp()
 
-    def mark_handles_closed(self) -> None:
+    def begin_final_db_stabilization(self) -> None:
+        """Open the final DB-dependent stabilization window.
+
+        Every SQLite read/write needed to make the swap artifact sidecar-free
+        must happen in this state.  The next state is HANDLES_CLOSED and is
+        reachable only through ``complete_final_db_stabilization``.
+        """
+
         self._require(CandidateBState.EVIDENCE_COMPLETE)
+
+        self.state = CandidateBState.FINAL_DB_STABILIZATION
+
+    def complete_final_db_stabilization(
+        self,
+        stabilization: Mapping[str, Any],
+        evidence: Mapping[str, Any],
+    ) -> None:
+        """Validate final SQLite evidence, then close the DB-open boundary."""
+
+        self._require(CandidateBState.FINAL_DB_STABILIZATION)
+        if stabilization.get("passed") is not True:
+            raise CandidateBSealError("Candidate B final DB stabilization did not pass")
+        if stabilization.get("checkpoint_passed") is not True:
+            raise CandidateBSealError("Candidate B final checkpoint did not pass")
+        if stabilization.get("journal_mode_after_stabilization") != "delete":
+            raise CandidateBSealError(
+                "Candidate B final journal mode must be DELETE before sealing"
+            )
+        if stabilization.get("sidecars_absent") is not True:
+            raise CandidateBSealError("Candidate B sidecars must be absent before sealing")
+        stable_samples = stabilization.get("stable_samples")
+        if not isinstance(stable_samples, list) or len(stable_samples) < 4:
+            raise CandidateBSealError(
+                "Candidate B requires at least four stable sidecar-free filesystem samples"
+            )
+        final_state = stabilization.get("final_file_state")
+        if not isinstance(final_state, Mapping):
+            raise CandidateBSealError("Candidate B final filesystem evidence is missing")
+        for sidecar in ("wal", "shm"):
+            state = final_state.get(sidecar)
+            if not isinstance(state, Mapping) or state.get("exists") is not False:
+                raise CandidateBSealError(
+                    f"Candidate B final {sidecar} sidecar must be absent"
+                )
+
+        b0_logical = evidence.get("logical_fingerprint")
+        final_logical = stabilization.get("logical_fingerprint")
+        if not isinstance(b0_logical, Mapping) or not isinstance(final_logical, Mapping):
+            raise CandidateBSealError("Candidate B logical evidence is missing at stabilization")
+        if b0_logical.get("sha256") != final_logical.get("sha256"):
+            raise CandidateBSealError("Candidate B logical state changed during stabilization")
+        if b0_logical.get("primary_keys") != final_logical.get("primary_keys"):
+            raise CandidateBSealError("Candidate B business PK state changed during stabilization")
+        b0_schema = evidence.get("schema_fingerprint")
+        final_schema = stabilization.get("schema_fingerprint")
+        if not isinstance(b0_schema, Mapping) or not isinstance(final_schema, Mapping):
+            raise CandidateBSealError("Candidate B schema evidence is missing at stabilization")
+        if b0_schema.get("sha256") != final_schema.get("sha256"):
+            raise CandidateBSealError("Candidate B schema changed during stabilization")
+        if stabilization.get("row_accounting") != evidence.get("row_accounting"):
+            raise CandidateBSealError("Candidate B row accounting changed during stabilization")
+
+        self.final_db_stabilization = dict(stabilization)
+        self.final_db_stabilization_at = _timestamp()
         self.state = CandidateBState.HANDLES_CLOSED
         self.handles_closed_at = _timestamp()
+
+    def mark_handles_closed(self) -> None:
+        """Reject the old unsafe close transition.
+
+        Candidate B may not reach the terminal rename probe without the
+        sidecar-free final DB stabilization proof.
+        """
+
+        raise CandidateBSealError(
+            "Candidate B handles cannot close before final DB stabilization"
+        )
 
     def finalize_rename_probe(
         self,
@@ -160,6 +236,8 @@ class CandidateBTerminalSeal:
             "post_seal_db_open_count": self.post_seal_db_open_count,
             "post_seal_db_open_attempts": self.post_seal_db_open_attempts,
             "evidence_complete_at": self.evidence_complete_at,
+            "final_db_stabilization_at": self.final_db_stabilization_at,
+            "final_db_stabilization": self.final_db_stabilization,
             "handles_closed_at": self.handles_closed_at,
             "rename_at": self.rename_at,
             "sealed_at": self.sealed_at,

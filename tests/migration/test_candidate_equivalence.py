@@ -77,6 +77,21 @@ def _evidence(
         }
     )
     if stage == B0_STAGE:
+        evidence["final_db_stabilization"] = {
+            "passed": True,
+            "checkpoint_passed": True,
+            "journal_mode_after_stabilization": "delete",
+            "sidecars_absent": True,
+            "stable_samples": [{"sample": index} for index in range(4)],
+            "final_file_state": {
+                "main": {"exists": True},
+                "wal": {"exists": False},
+                "shm": {"exists": False},
+            },
+            "logical_fingerprint": evidence["logical_fingerprint"],
+            "schema_fingerprint": evidence["schema_fingerprint"],
+            "row_accounting": evidence["row_accounting"],
+        }
         evidence["terminal_seal"] = {
             "candidate": str(path.resolve()),
             "state": "SEALED",

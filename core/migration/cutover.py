@@ -174,6 +174,236 @@ def checkpoint_database(path: Path | str) -> dict[str, Any]:
         connection.close()
 
 
+def candidate_b_file_state(path: Path | str) -> dict[str, Any]:
+    """Capture filesystem-only state for a SQLite artifact and its sidecars."""
+
+    def one(target: Path, *, wal: bool = False) -> dict[str, Any]:
+        if not target.is_file():
+            return {
+                "path": str(target),
+                "exists": False,
+                "size": None,
+                "sha256": None,
+                "wal_frame_count": 0 if wal else None,
+            }
+        size = target.stat().st_size
+        frame_count: int | None = None
+        try:
+            if wal:
+                # A WAL header is 32 bytes and each frame is 24 bytes plus the
+                # database page size.  This is a byte-level observation only;
+                # it never opens SQLite and fails closed for malformed lengths.
+                frame_count = 0
+                if size:
+                    with target.open("rb") as handle:
+                        header = handle.read(32)
+                    if len(header) != 32 or header[:4] not in {b"7\x7f\x06\x82", b"7\x7f\x06\x83"}:
+                        frame_count = None
+                    else:
+                        page_size = int.from_bytes(header[8:12], "big") or 65536
+                        frame_size = page_size + 24
+                        payload = size - 32
+                        frame_count = (
+                            payload // frame_size
+                            if payload >= 0 and payload % frame_size == 0
+                            else None
+                        )
+            return {
+                "path": str(target),
+                "exists": True,
+                "size": size,
+                "sha256": _sha256(target),
+                "mtime_ns": target.stat().st_mtime_ns,
+                "wal_frame_count": frame_count,
+            }
+        except OSError as exc:
+            return {
+                "path": str(target),
+                "exists": True,
+                "size": size,
+                "sha256": None,
+                "mtime_ns": target.stat().st_mtime_ns,
+                "wal_frame_count": None if wal else None,
+                "read_error": f"{type(exc).__name__}: {exc}",
+            }
+
+    resolved = Path(path).expanduser().resolve(strict=False)
+    return {
+        "main": one(resolved),
+        "wal": one(Path(f"{resolved}-wal"), wal=True),
+        "shm": one(Path(f"{resolved}-shm")),
+    }
+
+
+def stabilize_candidate_b_database(
+    path: Path | str,
+    b0: Mapping[str, Any],
+    *,
+    stable_sample_count: int = 4,
+    sample_interval_seconds: float = 0.25,
+) -> dict[str, Any]:
+    """Finalize Candidate B in one DB-dependent, pre-seal lifecycle window.
+
+    The candidate is expected to have no pending WAL frames.  Empty/persistent
+    WAL and SHM sidecars are safely resolved by SQLite: checkpoint first, then
+    transition the artifact to DELETE journal mode while the stabilization
+    connection is still open.  The Production StateStore later changes its
+    own connection to WAL again.
+    """
+
+    resolved = Path(path).expanduser().resolve(strict=False)
+    if not resolved.is_file():
+        raise CutoverBlocked(f"Candidate B does not exist: {resolved}")
+    if stable_sample_count < 4:
+        raise CutoverBlocked("Candidate B requires at least four stable samples")
+
+    before_state = candidate_b_file_state(resolved)
+    pending_frames = before_state["wal"].get("wal_frame_count")
+    if pending_frames is None:
+        raise CutoverBlocked("Candidate B WAL is malformed; refusing finalization")
+    if int(pending_frames) > 0:
+        raise CutoverBlocked(
+            "Candidate B WAL contains uncheckpointed frames; refusing finalization: "
+            f"{pending_frames}"
+        )
+
+    assert_candidate_b_database_open_allowed(resolved)
+    connection = sqlite3.connect(str(resolved), timeout=5)
+    try:
+        connection.execute("PRAGMA busy_timeout=5000")
+        journal_before = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        checkpoint_rows = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+        if any(row and int(row[0]) != 0 for row in checkpoint_rows):
+            raise CutoverBlocked(
+                f"Candidate B final checkpoint was busy: {checkpoint_rows}"
+            )
+        journal_after = str(
+            connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+        ).lower()
+        if journal_after != "delete":
+            raise CutoverBlocked(
+                f"Candidate B could not enter sidecar-free DELETE mode: {journal_after}"
+            )
+        connection.execute("PRAGMA foreign_keys=ON")
+        busy_timeout = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
+        foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+        integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+        foreign_key_violations = [
+            tuple(row) for row in connection.execute("PRAGMA foreign_key_check").fetchall()
+        ]
+        page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+        freelist_count = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+        connection.commit()
+    except CutoverBlocked:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise CutoverBlocked(
+            "Candidate B finalization connection failed; an open handle or lock remains"
+        ) from exc
+    finally:
+        connection.close()
+
+    after_checkpoint_state = candidate_b_file_state(resolved)
+    if after_checkpoint_state["wal"]["exists"] or after_checkpoint_state["shm"]["exists"]:
+        raise CutoverBlocked(
+            "Candidate B sidecars remain after SQLite finalization: "
+            f"{after_checkpoint_state}"
+        )
+    if integrity != "ok" or foreign_key_violations:
+        raise CutoverBlocked(
+            "Candidate B final integrity/FK gate failed: "
+            f"integrity={integrity} fk={foreign_key_violations}"
+        )
+    if foreign_keys != 1 or busy_timeout != 5000:
+        raise CutoverBlocked(
+            "Candidate B final SQLite connection contract failed: "
+            f"foreign_keys={foreign_keys} busy_timeout={busy_timeout}"
+        )
+
+    info = inspect_database(resolved)
+    logical = logical_data_fingerprint(resolved)
+    schema = schema_fingerprint(resolved)
+    b0_logical = b0.get("logical_fingerprint")
+    b0_schema = b0.get("schema_fingerprint")
+    if not isinstance(b0_logical, Mapping) or not isinstance(b0_schema, Mapping):
+        raise CutoverBlocked("Candidate B B0 logical/schema evidence is incomplete")
+    if logical.get("sha256") != b0_logical.get("sha256"):
+        raise CutoverBlocked("Candidate B logical state changed during finalization")
+    if logical.get("primary_keys") != b0_logical.get("primary_keys"):
+        raise CutoverBlocked("Candidate B business PK state changed during finalization")
+    if schema.get("sha256") != b0_schema.get("sha256"):
+        raise CutoverBlocked("Candidate B schema changed during finalization")
+
+    stable_samples: list[dict[str, Any]] = []
+    for index in range(stable_sample_count):
+        sample = candidate_b_file_state(resolved)
+        sample["sample"] = index
+        sample["utc"] = datetime.now(UTC).isoformat()
+        stable_samples.append(sample)
+        if index < stable_sample_count - 1:
+            time.sleep(sample_interval_seconds)
+
+    def stability_key(sample: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            name: sample.get(name)
+            for name in ("main", "wal", "shm")
+        }
+
+    if any(
+        stability_key(sample) != stability_key(stable_samples[0])
+        for sample in stable_samples[1:]
+    ):
+        raise CutoverBlocked(f"Candidate B final physical state is unstable: {stable_samples}")
+    final_state = stable_samples[-1]
+    sidecars_absent = not final_state["wal"]["exists"] and not final_state["shm"]["exists"]
+    if not final_state["main"]["exists"] or not sidecars_absent:
+        raise CutoverBlocked(f"Candidate B final sidecar-free gate failed: {final_state}")
+
+    return {
+        "passed": True,
+        "checkpoint": {
+            "checkpoint": checkpoint_rows,
+            "integrity_check": integrity,
+        },
+        "checkpoint_passed": True,
+        "journal_mode_before_stabilization": journal_before,
+        "journal_mode_after_stabilization": journal_after,
+        "sqlite_contract": {
+            "foreign_keys": foreign_keys,
+            "busy_timeout": busy_timeout,
+            "integrity_check": integrity,
+            "foreign_key_violations": foreign_key_violations,
+            "page_count": page_count,
+            "freelist_count": freelist_count,
+        },
+        "candidate_info": info,
+        "logical_fingerprint": logical,
+        "schema_fingerprint": schema,
+        "business_pk_fingerprint": _sha256_bytes(
+            json.dumps(
+                logical.get("primary_keys"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ),
+        "row_accounting": b0.get("row_accounting"),
+        "before_finalization": before_state,
+        "after_checkpoint": after_checkpoint_state,
+        "final_file_state": final_state,
+        "stable_samples": stable_samples,
+        "sidecars_absent": True,
+        "final_candidate_sha256": final_state["main"]["sha256"],
+    }
+
+
+def _sha256_bytes(value: bytes) -> str:
+    digest = hashlib.sha256()
+    digest.update(value)
+    return digest.hexdigest()
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
