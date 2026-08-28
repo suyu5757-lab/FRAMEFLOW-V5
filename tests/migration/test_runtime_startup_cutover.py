@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 
-from core.migration.cutover import fresh_candidate_from_production, perform_production_cutover
+from core.migration.cutover import checkpoint_database, fresh_candidate_from_production, perform_production_cutover
 from core.migration.production_environment import FORMAL_PYTHON
 from core.runtime.persistence import RuntimeStartupConfig, write_runtime_startup_config
 from core.runtime.state_store.factory import inspect_database
@@ -46,6 +46,13 @@ def _formal_evidence(candidate: Path, archive: Path) -> dict[str, object]:
             "historical_failed": 0,
         }
 
+    checkpoint = checkpoint_database(candidate)
+    candidate_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    stable_file_state = {
+        "main": {"exists": True, "size": candidate.stat().st_size, "sha256": candidate_sha},
+        "wal": {"exists": False, "size": None, "sha256": None},
+        "shm": {"exists": False, "size": None, "sha256": None},
+    }
     return {
         "formal_launcher_evidence_version": 1,
         "status": "PASS",
@@ -67,8 +74,16 @@ def _formal_evidence(candidate: Path, archive: Path) -> dict[str, object]:
             "legacy_readonly_db": str(archive.resolve()),
         },
         "ownership_environment_fields_injected": [],
-        "candidate_sha256_after_probe": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+        "candidate_sha256_after_probe": candidate_sha,
         "probe_fixture_cleanup": {"passed": True, "remaining": []},
+        "final_stabilization": {
+            "backend_stopped": True,
+            "port_free": {"port": 8877, "free": True, "observations": [{"free": True}] * 3},
+            "checkpoint": checkpoint,
+            "stable_samples": [stable_file_state] * 3,
+            "final_file_state": stable_file_state,
+            "final_candidate_sha256": candidate_sha,
+        },
         "boots": [boot("first_start"), boot("restart")],
     }
 

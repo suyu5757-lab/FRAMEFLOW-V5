@@ -170,6 +170,48 @@ Runtime source of truth = LEGACY_V3
 READY FOR FINAL PRODUCTION CUTOVER = YES
 ```
 
+## CANDIDATE_A_FORMAL_EVIDENCE_STABILIZATION_CLOSURE_2026-08-28
+
+The prior `T03FINAL-20260828T122832Z-bab2dd19` pre-swap abort is retained as
+historical evidence. Its formal Candidate A SHA was captured before the
+isolated SQLite WAL/checkpoint lifecycle had fully stabilized:
+
+```text
+recorded formal SHA = 1682c25313356186cc7fd5d3ffa0eafb9588bfd94c680bbcb3e6282f0c123681
+final stabilized SHA = eb98fedc0d087dd0ea3526e1670b721e3eb5b88af4588af07cb819a88b703155
+logical/domain/PK/row-accounting state = unchanged after cleanup
+```
+
+Fresh byte-level evidence proved legitimate Candidate A WAL activity and a
+final evidence timing defect, not a hidden migration or Candidate B write.
+The formal harness now waits for isolated port FREE, requires closed fixture
+cleanup, executes a non-busy `wal_checkpoint(TRUNCATE)`, requires WAL/SHM
+absence and stable physical samples, then binds the final SHA. Candidate A
+physical SHA remains artifact-integrity evidence; semantic equivalence remains
+source/revision/implementation/schema/logical/PK/row-accounting based.
+
+Closure report:
+
+```text
+docs/T03_CANDIDATE_A_EVIDENCE_STABILIZATION_CLOSURE.md
+```
+
+Fresh isolated certification passed Candidate A first/restart readiness,
+19/19, 17/17, A0/A1 logical NONE, Candidate A rename, Candidate B unopened
+validation/rename, A0/B0 equivalence, and aggregate pre-swap dry-run. The dry
+run did not call `perform_production_cutover`; production remains Legacy V3.
+
+```text
+focused stabilization regressions = 50 passed
+schema/migration/runtime = 130 passed
+V3 = 37 passed
+post-cutover DB contract = 1 passed
+Git safety = 10 passed
+full suite = 268 passed
+production replacement = NO
+runtime-startup.json = ABSENT
+```
+
 ## V5 readiness closure — 2026-08-28
 
 The blocker from the failed run is now positively identified as

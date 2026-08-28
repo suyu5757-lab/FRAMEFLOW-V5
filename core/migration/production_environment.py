@@ -205,9 +205,34 @@ def verify_formal_launcher_evidence(
     cleanup = evidence.get("probe_fixture_cleanup")
     if not isinstance(cleanup, Mapping) or cleanup.get("passed") is not True or cleanup.get("remaining") != []:
         raise ProductionEnvironmentError("formal launcher probe fixture cleanup did not pass")
+    stabilization = evidence.get("final_stabilization")
+    if not isinstance(stabilization, Mapping):
+        raise ProductionEnvironmentError("formal launcher final stabilization evidence is missing")
+    if stabilization.get("backend_stopped") is not True:
+        raise ProductionEnvironmentError("formal launcher backend shutdown was not proven")
+    port_free = stabilization.get("port_free")
+    if not isinstance(port_free, Mapping) or port_free.get("free") is not True:
+        raise ProductionEnvironmentError("formal launcher isolated port was not proven free")
+    checkpoint = stabilization.get("checkpoint")
+    checkpoint_rows = checkpoint.get("checkpoint") if isinstance(checkpoint, Mapping) else None
+    if not isinstance(checkpoint_rows, list) or any(
+        not isinstance(row, (list, tuple)) or not row or int(row[0]) != 0
+        for row in checkpoint_rows
+    ):
+        raise ProductionEnvironmentError("formal launcher final WAL checkpoint did not pass")
+    stable_samples = stabilization.get("stable_samples")
+    final_file_state = stabilization.get("final_file_state")
+    if not isinstance(stable_samples, list) or len(stable_samples) < 3 or not isinstance(final_file_state, Mapping):
+        raise ProductionEnvironmentError("formal launcher final stable file evidence is missing")
+    for sidecar in ("wal", "shm"):
+        sidecar_state = final_file_state.get(sidecar)
+        if not isinstance(sidecar_state, Mapping) or sidecar_state.get("exists") is True:
+            raise ProductionEnvironmentError(f"formal launcher final {sidecar} sidecar remains")
     expected_sha = str(evidence.get("candidate_sha256_after_probe") or "")
     if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
         raise ProductionEnvironmentError("formal launcher candidate fingerprint evidence is missing")
+    if str(stabilization.get("final_candidate_sha256") or "") != expected_sha:
+        raise ProductionEnvironmentError("formal launcher final stabilization SHA is inconsistent")
     actual_digest = hashlib.sha256()
     with expected_candidate.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):

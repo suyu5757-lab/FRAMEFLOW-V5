@@ -17,8 +17,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from sqlalchemy import delete
@@ -33,6 +34,9 @@ from core.migration.production_environment import (
     FORMAL_PYTHON,
     verify_production_interpreter,
 )
+from core.migration.cutover import checkpoint_database
+from core.migration.equivalence import logical_data_fingerprint, schema_fingerprint
+from core.migration.port_ownership import parse_netstat_listeners
 from core.schemas.runtime_mvp import metadata
 from core.runtime.persistence import RuntimeStartupConfig, write_runtime_startup_config
 from core.runtime.state_store import StateStore
@@ -113,6 +117,110 @@ def stop_backend(process: subprocess.Popen[str]) -> None:
         process.stdout.close()
     if process.stderr is not None:
         process.stderr.close()
+
+
+def listener_pids(port: int) -> list[int]:
+    output = subprocess.run(
+        ["netstat.exe", "-ano", "-p", "tcp"],
+        capture_output=True,
+        text=True,
+        check=True,
+        encoding="utf-8",
+        errors="replace",
+    ).stdout
+    return [int(item["pid"]) for item in parse_netstat_listeners(output, port)]
+
+
+def wait_for_port_free(port: int, timeout: float = 15.0) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    observations: list[dict[str, Any]] = []
+    while time.monotonic() < deadline:
+        pids = listener_pids(port)
+        observations.append(
+            {
+                "utc": datetime.now(UTC).isoformat(),
+                "listener_pids": pids,
+                "free": not pids,
+            }
+        )
+        if not pids:
+            return {"port": port, "free": True, "observations": observations}
+        time.sleep(0.2)
+    raise RuntimeError(f"isolated runtime port did not become free: port={port} observations={observations}")
+
+
+def _candidate_file_state(path: Path) -> dict[str, Any]:
+    def one(target: Path) -> dict[str, Any]:
+        if not target.exists():
+            return {"exists": False, "size": None, "sha256": None}
+        return {
+            "exists": True,
+            "size": target.stat().st_size,
+            "sha256": sha256(target),
+            "mtime_ns": target.stat().st_mtime_ns,
+        }
+
+    return {
+        "main": one(path),
+        "wal": one(Path(f"{path}-wal")),
+        "shm": one(Path(f"{path}-shm")),
+    }
+
+
+def stabilize_candidate_after_probe(candidate: Path, port: int) -> dict[str, Any]:
+    """Close the SQLite lifecycle before binding physical evidence.
+
+    Candidate A is allowed to run and write its isolated smoke fixture.  The
+    physical file is therefore not authoritative until the backend is gone,
+    the port is free, the fixture cleanup connection is closed, and SQLite has
+    checkpointed the WAL.  This function makes that boundary explicit and
+    records the stable state used by the formal evidence gate.
+    """
+
+    port_free = wait_for_port_free(port)
+    checkpoint = checkpoint_database(candidate)
+    checkpoint_rows = checkpoint.get("checkpoint") or []
+    if any(int(row[0]) != 0 for row in checkpoint_rows if row):
+        raise RuntimeError(f"candidate WAL checkpoint was busy: {checkpoint}")
+    stable_samples: list[dict[str, Any]] = []
+    for index in range(4):
+        state = _candidate_file_state(candidate)
+        state["sample"] = index
+        state["utc"] = datetime.now(UTC).isoformat()
+        stable_samples.append(state)
+        if index < 3:
+            time.sleep(0.25)
+    def stability_key(sample: Mapping[str, Any]) -> dict[str, Any]:
+        return {name: sample.get(name) for name in ("main", "wal", "shm")}
+
+    if any(
+        stability_key(sample) != stability_key(stable_samples[0])
+        for sample in stable_samples[1:]
+    ):
+        raise RuntimeError(f"candidate physical state did not stabilize: {stable_samples}")
+    final_state = stable_samples[-1]
+    if final_state["wal"]["exists"] or final_state["shm"]["exists"]:
+        raise RuntimeError(f"candidate sidecars remain after final checkpoint: {final_state}")
+    info = inspect_database(candidate)
+    logical = logical_data_fingerprint(candidate)
+    schema = schema_fingerprint(candidate)
+    post_inspect = _candidate_file_state(candidate)
+    if stability_key(post_inspect) != stability_key(final_state):
+        raise RuntimeError(
+            "candidate changed while final evidence was being inspected: "
+            f"before={final_state} after={post_inspect}"
+        )
+    return {
+        "backend_stopped": True,
+        "port_free": port_free,
+        "checkpoint": checkpoint,
+        "stable_samples": stable_samples,
+        "final_file_state": final_state,
+        "candidate_info": info,
+        "schema_fingerprint": schema,
+        "logical_fingerprint": logical,
+        "final_candidate_sha256": final_state["main"]["sha256"],
+    }
 
 
 def runtime_sqlite_gates(candidate: Path) -> dict[str, Any]:
@@ -340,6 +448,8 @@ def main() -> int:
     candidate_info = inspect_database(candidate)
     if candidate_info["schema"] != "V5_RUNTIME":
         raise SystemExit(f"candidate is not V5_RUNTIME: {candidate_info['schema']}")
+    candidate_pre_probe_logical = logical_data_fingerprint(candidate)
+    candidate_pre_probe_schema = schema_fingerprint(candidate)
 
     config = RuntimeStartupConfig.build(
         runtime_mode="v5",
@@ -400,12 +510,16 @@ def main() -> int:
             results.append({"boot": boot, "health": health, **gate})
         finally:
             stop_backend(process)
+            shutdown = wait_for_port_free(args.port)
+            if results:
+                results[-1]["shutdown"] = shutdown
 
     fixture_cleanup = cleanup_probe_fixtures(
         candidate, [str(result["fixture_id"]) for result in results]
     )
-    candidate_post_probe = inspect_database(candidate)
-    candidate_sha256_after_probe = sha256(candidate)
+    final_stabilization = stabilize_candidate_after_probe(candidate, args.port)
+    candidate_post_probe = final_stabilization["candidate_info"]
+    candidate_sha256_after_probe = final_stabilization["final_candidate_sha256"]
 
     payload = {
         "formal_launcher_evidence_version": FORMAL_LAUNCHER_EVIDENCE_VERSION,
@@ -423,9 +537,12 @@ def main() -> int:
         ],
         "candidate": str(candidate),
         "candidate_info": candidate_info,
+        "candidate_pre_probe_logical_fingerprint": candidate_pre_probe_logical,
+        "candidate_pre_probe_schema_fingerprint": candidate_pre_probe_schema,
         "runtime_sqlite_gates": sqlite_gates,
         "candidate_post_probe_info": candidate_post_probe,
         "candidate_sha256_after_probe": candidate_sha256_after_probe,
+        "final_stabilization": final_stabilization,
         "probe_fixture_cleanup": fixture_cleanup,
         "legacy": str(legacy),
         "runtime_config": str(config_path),

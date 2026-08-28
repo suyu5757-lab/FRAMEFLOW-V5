@@ -20,6 +20,7 @@ from core.migration.production_environment import (
     REQUIRED_RUNTIME_IMPORTS,
     ProductionEnvironmentError,
     declared_jsonschema_version,
+    verify_formal_launcher_evidence,
     verify_production_interpreter,
 )
 from tests.conftest import isolated_legacy_v3_path
@@ -128,6 +129,54 @@ def test_e7_formal_launcher_restart_gates(formal_probe: dict[str, object]) -> No
     assert restarted["health"]["runtime_mode"] == "v5"
     assert (restarted["api_passed"], restarted["api_failed"]) == (19, 0)
     assert (restarted["historical_passed"], restarted["historical_failed"]) == (17, 0)
+
+
+def test_candidate_a_formal_evidence_matches_final_stable_state(
+    formal_probe: dict[str, object],
+) -> None:
+    stabilization = formal_probe["final_stabilization"]
+    assert stabilization["backend_stopped"] is True
+    assert stabilization["port_free"]["free"] is True
+    assert stabilization["checkpoint"]["checkpoint"] == [[0, 0, 0]]
+    assert len(stabilization["stable_samples"]) >= 3
+    assert stabilization["final_file_state"]["wal"]["exists"] is False
+    assert stabilization["final_file_state"]["shm"]["exists"] is False
+    assert stabilization["final_candidate_sha256"] == formal_probe["candidate_sha256_after_probe"]
+    assert formal_probe["candidate_sha256_after_probe"] == _sha256(
+        Path(str(formal_probe["candidate"]))
+    )
+    verify_formal_launcher_evidence(
+        formal_probe,
+        candidate=Path(str(formal_probe["candidate"])),
+        legacy_archive=Path(str(formal_probe["legacy"])),
+    )
+
+
+def test_candidate_a_logical_state_stable_across_first_restart_shutdown(
+    formal_probe: dict[str, object],
+) -> None:
+    before = formal_probe["candidate_pre_probe_logical_fingerprint"]
+    after = formal_probe["final_stabilization"]["logical_fingerprint"]
+    assert before["sha256"] == after["sha256"]
+    assert before["tables"] == after["tables"]
+    assert before["primary_keys"] == after["primary_keys"]
+    assert before["row_counts"] == after["row_counts"]
+
+
+def test_candidate_a_formal_evidence_rejects_early_physical_sha(
+    formal_probe: dict[str, object],
+) -> None:
+    evidence = dict(formal_probe)
+    evidence["candidate_sha256_after_probe"] = "0" * 64
+    with pytest.raises(
+        ProductionEnvironmentError,
+        match="final stabilization SHA is inconsistent",
+    ):
+        verify_formal_launcher_evidence(
+            evidence,
+            candidate=Path(str(formal_probe["candidate"])),
+            legacy_archive=Path(str(formal_probe["legacy"])),
+        )
 
 
 def test_e8_wrong_interpreter_fails_identity_gate(formal_probe: dict[str, object]) -> None:
