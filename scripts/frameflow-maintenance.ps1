@@ -212,6 +212,14 @@ function Assert-TargetRuntime {
     if ([string]$health.runtime_mode -ne [string]$Target.mode) {
         throw "Runtime mode mismatch during lifecycle: expected=$($Target.mode) actual=$($health.runtime_mode)."
     }
+    if ([string]$Target.mode -eq 'v5' -and $health.ready -ne $true) {
+        $failing = if ($health.readiness -and $health.readiness.failing_predicates) {
+            ($health.readiness.failing_predicates -join ',')
+        } else {
+            'not_reported'
+        }
+        throw "V5 readiness gate failed: status=$($health.status) ready=$($health.ready) failing_predicates=$failing."
+    }
     return [ordered]@{
         OwnerPid = $ownerPid
         Process = $process

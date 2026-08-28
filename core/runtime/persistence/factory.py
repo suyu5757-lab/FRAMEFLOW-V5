@@ -16,6 +16,15 @@ class RuntimeModeError(RuntimeError):
     """Raised when runtime mode configuration is missing or unsafe."""
 
 
+def _flag(values: Mapping[str, str], name: str) -> bool:
+    return str(values.get(name) or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def resolve_runtime_mode(environment: Mapping[str, str] | None = None) -> str:
     try:
         values = resolve_runtime_environment(environment)
@@ -39,12 +48,16 @@ def resolve_v5_database_path(environment: Mapping[str, str] | None = None) -> Pa
             "it never defaults to data/frameflow.db"
         )
     path = Path(raw).expanduser().resolve(strict=False)
-    production_enabled = str(values.get("FRAMEFLOW_V5_PRODUCTION") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    production_enabled = _flag(values, "FRAMEFLOW_V5_PRODUCTION")
+    production_simulation = _flag(values, "FRAMEFLOW_V5_PRODUCTION_SIMULATION")
+    if production_simulation and not production_enabled:
+        raise RuntimeModeError(
+            "FRAMEFLOW_V5_PRODUCTION_SIMULATION requires FRAMEFLOW_V5_PRODUCTION=1"
+        )
+    if production_simulation and path == CANONICAL_DATABASE_PATH:
+        raise RuntimeModeError(
+            "production-like V5 simulation must not use the canonical production database"
+        )
     if path == CANONICAL_DATABASE_PATH and not production_enabled:
         raise RuntimeModeError(
             "pre-cutover V5 mode refuses the canonical production database path"
@@ -78,13 +91,20 @@ def create_runtime_persistence(
         LegacyReadOnlyCompatibility(legacy_resolved)
     except LegacyReadOnlyError as exc:
         raise RuntimeModeError(str(exc)) from exc
-    production_enabled = str(values.get("FRAMEFLOW_V5_PRODUCTION") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    store = open_runtime_store(database_path, candidate=not production_enabled)
+    production_enabled = _flag(values, "FRAMEFLOW_V5_PRODUCTION")
+    production_simulation = _flag(values, "FRAMEFLOW_V5_PRODUCTION_SIMULATION")
+    if production_simulation and not production_enabled:
+        raise RuntimeModeError(
+            "FRAMEFLOW_V5_PRODUCTION_SIMULATION requires FRAMEFLOW_V5_PRODUCTION=1"
+        )
+    if production_simulation and database_path == CANONICAL_DATABASE_PATH:
+        raise RuntimeModeError(
+            "production-like V5 simulation must not use the canonical production database"
+        )
+    store = open_runtime_store(
+        database_path,
+        candidate=not production_enabled or production_simulation,
+    )
     try:
         return RuntimePersistence(store, legacy_path=legacy_resolved)
     except Exception:

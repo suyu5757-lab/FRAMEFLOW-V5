@@ -170,6 +170,102 @@ Runtime source of truth = LEGACY_V3
 READY FOR FINAL PRODUCTION CUTOVER = YES
 ```
 
+## V5 readiness closure — 2026-08-28
+
+The blocker from the failed run is now positively identified as
+`V5_HTTP_200_BUT_READY_FALSE` caused by a Legacy compatibility readiness
+projection failure. `RuntimePersistence.health_payload()` had returned
+hard-coded `unbound` capability entries even though the startup config's
+read-only Legacy archive contained the healthy OpenCode orchestrator and
+Jimeng video bindings used by the established Legacy readiness contract.
+
+The repair is documented in
+`docs/T03_V5_PRODUCTION_READINESS_CLOSURE.md`, with the complete predicate
+matrix in `docs/T03_V5_PRODUCTION_READINESS_PREDICATE_MATRIX.md`.
+
+The formal readiness harness now requires V5 `ready=true`, and the mode-aware
+launcher plus both PowerShell StartTarget validation paths fail closed when a
+V5 process returns HTTP 200 but is not ready. A production=true-like isolated
+certification passed first start and restart, with 19/19 Workbench routes,
+17/17 SH004-SH020 compatibility routes, exact isolated doctor DB, WAL,
+foreign keys, busy timeout 5000, integrity, and FK checks all passing. The
+invalid-provider negative test also remained false with the exact failing
+predicate reported.
+
+```text
+READINESS CLOSURE = PASS
+PRODUCTION CUTOVER = NOT_PERFORMED
+RUNTIME SOURCE OF TRUTH = LEGACY_V3
+Production DB replaced = NO
+Production DB intentionally migrated = NO
+runtime-startup.json = ABSENT
+Dual write = NO
+Dual source = NO
+READY FOR ONE FINAL PRODUCTION CUTOVER RETRY = YES
+```
+
+This closure does not authorize or perform another production swap. The
+historical rollback and all prior evidence remain retained.
+
+## FINAL_VERIFIED_PRODUCTION_CUTOVER_2026-08-28_ROLLED_BACK
+
+Fresh run:
+
+`T03FINAL-20260828T110620Z-817060f4`
+
+The pre-swap certification passed from a newly checkpointed Legacy source:
+
+```text
+FINAL_LEGACY_SHA = 246df9c2ee8216a289c22b5ff6652c9b9c7660a824d5782e7eabc19e80e9a975
+FINAL_LEGACY_LOGICAL_SHA = 32f2ce5e06781def72f3873bbfd906855110545cb0b43d2304b7fb9487c0467a
+Archive = 5/5 READ_ONLY
+Candidate A first/restart = 19/19 + 17/17 twice
+Candidate A A0/A1 delta = NONE
+Candidate B backend-opened = NO
+A0/B0 = source/schema/logical/PK/row accounting PASS
+UNKNOWN = 0
+UNACCOUNTED = 0
+```
+
+The one authorized atomic replacement completed successfully, but the first
+real V5 `StartTarget` gate failed because the runtime returned HTTP 200 with
+`runtime_mode=v5` while `ready=false` and `status=not_ready`. The mandatory
+ready gate was not weakened. The failed V5 canonical DB, startup config, and
+WAL sidecars were preserved at:
+
+```text
+data/.cutover/T03FINAL-20260828T110620Z-817060f4/failed-v5-production.db
+data/.cutover/T03FINAL-20260828T110620Z-817060f4/failed-v5-runtime-startup.json
+```
+
+Rollback then passed exactly once:
+
+```text
+V5 owner stopped = PID 31956
+8787 after V5 stop = FREE
+Legacy archive restored = PASS
+runtime-startup.json = ABSENT
+Legacy canonical = 41 tables / schema 16 / integrity PASS / FK PASS
+StartTarget(LEGACY) = PASS
+RestoreLegacy = PASS
+Installed Task Legacy restart = PASS (PID 24196, LastTaskResult=0)
+Second V5 swap = NO
+```
+
+Post-cutover V5 restart and V5-state regression were not run after the
+mandatory immediate rollback. The existing pre-cutover suites remained
+untouched and passed 31 lifecycle-focused, 123 schema/migration/runtime, and
+37 V3 tests. No T00-T03 re-audit or T05 work was started.
+
+```text
+PRODUCTION CUTOVER = ROLLED_BACK
+RUNTIME SOURCE OF TRUTH = LEGACY_V3
+ROLLBACK VERIFICATION = PASS
+INDEPENDENT FINAL AUDIT = PASS FOR ROLLED-BACK LEGACY STATE
+T03 FINAL STATUS = FAIL
+READY FOR T00-T03 FINAL INDEPENDENT RE-AUDIT = NO
+```
+
 Full evidence is in `docs/T03_PRODUCTION_PORT_OWNERSHIP_CLOSURE.md`. A future
 cutover must create a new final archive and use a new elevated maintenance
 state; the rolled-back run remains historical evidence only.

@@ -38,6 +38,7 @@ RUNTIME_ENVIRONMENT_KEYS = (
     "FRAMEFLOW_DB_PATH",
     "FRAMEFLOW_V5_DB",
     "FRAMEFLOW_V5_PRODUCTION",
+    "FRAMEFLOW_V5_PRODUCTION_SIMULATION",
     "FRAMEFLOW_LEGACY_READONLY_DB",
     RUNTIME_CONFIG_ENV,
 )
@@ -57,6 +58,7 @@ class RuntimeTarget:
     production: bool
     config_path: Path
     config_present: bool
+    production_simulation: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +70,7 @@ class RuntimeTarget:
             "production": self.production,
             "config_path": str(self.config_path),
             "config_present": self.config_present,
+            "production_simulation": self.production_simulation,
         }
 
     def child_environment(
@@ -92,6 +95,8 @@ class RuntimeTarget:
         else:
             values["FRAMEFLOW_RUNTIME_MODE"] = "legacy"
             values["FRAMEFLOW_DB_PATH"] = str(self.runtime_db)
+        if self.production_simulation:
+            values["FRAMEFLOW_V5_PRODUCTION_SIMULATION"] = "1"
         values["FRAMEFLOW_BIND_HOST"] = bind_host
         return values
 
@@ -153,10 +158,24 @@ def resolve_runtime_target(
         raise ProductionLauncherError(str(exc)) from exc
 
     runtime_db = Path(config.runtime_db).expanduser().resolve(strict=False)
+    production_simulation = str(os.environ.get("FRAMEFLOW_V5_PRODUCTION_SIMULATION") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     if config.runtime_mode == "v5":
-        if config.production and runtime_db != canonical_database.resolve(strict=False):
+        if config.production and runtime_db != canonical_database.resolve(strict=False) and not production_simulation:
             raise ProductionLauncherError(
                 "production V5 runtime must use the canonical database path"
+            )
+        if production_simulation and not config.production:
+            raise ProductionLauncherError(
+                "production-like V5 simulation requires production=true"
+            )
+        if production_simulation and runtime_db == canonical_database.resolve(strict=False):
+            raise ProductionLauncherError(
+                "production-like V5 simulation must not use the canonical database"
             )
         if not config.production and runtime_db == canonical_database.resolve(strict=False):
             raise ProductionLauncherError(
@@ -184,6 +203,7 @@ def resolve_runtime_target(
             production=bool(config.production),
             config_path=resolved_config,
             config_present=True,
+            production_simulation=production_simulation,
         )
 
     _require_database(runtime_db, "LEGACY_V3")
@@ -245,6 +265,14 @@ def _runtime_evidence(target: RuntimeTarget, port: int) -> dict[str, Any] | None
             "port is occupied by a runtime that does not match the selected target: "
             f"expected_mode={target.mode} actual_mode={health.get('runtime_mode')} "
             f"expected_db={expected_db} actual_db={doctor.get('database')}"
+        )
+    if target.mode == "v5" and health.get("ready") is not True:
+        readiness = health.get("readiness")
+        failing = readiness.get("failing_predicates") if isinstance(readiness, Mapping) else None
+        raise ProductionLauncherError(
+            "V5 runtime readiness gate failed: "
+            f"status={health.get('status')} ready={health.get('ready')} "
+            f"failing_predicates={failing or 'not_reported'}"
         )
     return {
         "port": port,

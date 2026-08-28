@@ -17,23 +17,8 @@ from sqlalchemy import delete
 
 from core.migration.legacy_compat import LegacyReadOnlyCompatibility, LegacyReadOnlyError
 from core.schemas.runtime_mvp import metadata
+from core.runtime.readiness import CAPABILITIES, evaluate_capabilities, readiness_summary
 from core.runtime.state_store import StateStore
-
-
-CAPABILITIES = (
-    "orchestrator",
-    "vision",
-    "image",
-    "image_edit",
-    "video",
-    "tts",
-    "music",
-    "sfx",
-    "upscale",
-    "lip_sync",
-    "upload",
-)
-
 
 class RuntimePersistenceError(RuntimeError):
     """Raised for unsupported V5 application operations."""
@@ -378,30 +363,46 @@ class RuntimePersistence:
             connection.execute(delete(projects).where(projects.c.id == project_id))
 
     def health_payload(self) -> dict[str, Any]:
-        capabilities = {
-            capability: {
-                "ready": False,
-                "status": "unbound",
-                "provider_profile_id": None,
-                "provider": None,
-                "model": None,
-                "reason": "Provider persistence is outside T03-R2",
+        inputs = (
+            self._legacy.provider_readiness_inputs(CAPABILITIES)
+            if self._legacy is not None
+            else {
+                "profiles": {},
+                "bindings": {},
+                "source": {
+                    "kind": "legacy_readonly_archive",
+                    "path": None,
+                    "available": False,
+                    "reason": "legacy archive is not configured",
+                },
             }
-            for capability in CAPABILITIES
-        }
+        )
+        capabilities = evaluate_capabilities(inputs["bindings"], inputs["profiles"])
+        readiness = readiness_summary(capabilities)
         return {
-            "status": "not_ready",
-            "ok": False,
-            "ready": False,
-            "degraded": False,
+            "status": readiness["status"],
+            "ok": readiness["ok"],
+            "ready": readiness["ready"],
+            "degraded": readiness["degraded"],
             "version": "5.3.2",
             "schema_version": 22,
-            "openai_configured": False,
-            "audio": False,
-            "images": False,
-            "seedance": False,
+            "openai_configured": bool(
+                capabilities.get("image", {}).get("provider_profile_id")
+                or capabilities.get("orchestrator", {}).get("provider_profile_id")
+            ),
+            "audio": any(
+                bool(capabilities.get(key, {}).get("ready"))
+                for key in ("tts", "music", "sfx")
+            ),
+            "images": bool(
+                capabilities.get("image", {}).get("ready")
+                or capabilities.get("image_edit", {}).get("ready")
+            ),
+            "seedance": bool(capabilities.get("video", {}).get("ready")),
             "runtime_mode": "v5",
             "capabilities": capabilities,
+            "readiness": readiness,
+            "readiness_source": inputs["source"],
         }
 
     def settings_payload(self) -> dict[str, Any]:

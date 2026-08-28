@@ -225,7 +225,11 @@ def verify_formal_launcher_evidence(
         if boot.get("historical_passed") != 17 or boot.get("historical_failed") != 0:
             raise ProductionEnvironmentError(f"formal launcher {expected_name} historical gate failed")
         health = boot.get("health")
-        if not isinstance(health, Mapping) or health.get("runtime_mode") != "v5":
+        if (
+            not isinstance(health, Mapping)
+            or health.get("runtime_mode") != "v5"
+            or health.get("ready") is not True
+        ):
             raise ProductionEnvironmentError(f"formal launcher {expected_name} health gate failed")
     return dict(evidence)
 

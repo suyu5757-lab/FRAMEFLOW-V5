@@ -94,6 +94,39 @@ def test_invalid_v5_config_fails_closed_before_start() -> None:
         production_launcher.resolve_runtime_target(config_path)
 
 
+def test_v5_runtime_evidence_rejects_http_200_without_readiness(monkeypatch: pytest.MonkeyPatch) -> None:
+    target = production_launcher.RuntimeTarget(
+        mode="v5",
+        runtime_db=Path("candidate.db").resolve(),
+        legacy_readonly_db=Path("legacy.db").resolve(),
+        production=True,
+        config_path=Path("runtime-startup.json").resolve(),
+        config_present=True,
+    )
+    monkeypatch.setattr(
+        production_launcher,
+        "_listeners",
+        lambda _port: [{"pid": 12345}],
+    )
+    monkeypatch.setattr(
+        production_launcher,
+        "_get_json",
+        lambda _url: (
+            200,
+            {
+                "runtime_mode": "v5",
+                "status": "not_ready",
+                "ready": False,
+                "readiness": {"failing_predicates": ["orchestrator_capability_ready"]},
+            },
+        )
+        if "health" in _url
+        else (200, {"database": str(target.runtime_db)}),
+    )
+    with pytest.raises(production_launcher.ProductionLauncherError, match="readiness gate failed"):
+        production_launcher._runtime_evidence(target, 8787)
+
+
 def test_scheduled_task_setup_uses_mode_aware_runtime_launcher() -> None:
     narrow_setup = Path("scripts/update-frameflow-service-task.ps1").read_text(encoding="utf-8")
     startup = Path("scripts/start-frameflow-stack.ps1").read_text(encoding="utf-8")

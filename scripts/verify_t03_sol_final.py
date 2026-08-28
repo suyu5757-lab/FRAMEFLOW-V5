@@ -83,8 +83,18 @@ def wait_for_v5(port: int, process: subprocess.Popen[str], timeout: float = 30.0
             )
         try:
             status, payload = request_json(port, "GET", "/api/health")
-            if status == 200 and payload.get("runtime_mode") == "v5":
+            if (
+                status == 200
+                and payload.get("runtime_mode") == "v5"
+                and payload.get("ready") is True
+            ):
                 return payload
+            if status == 200 and payload.get("runtime_mode") == "v5":
+                last_error = RuntimeError(
+                    "V5 readiness gate is false: "
+                    f"status={payload.get('status')} "
+                    f"failing_predicates={(payload.get('readiness') or {}).get('failing_predicates')}"
+                )
         except Exception as exc:
             last_error = exc
         time.sleep(0.2)
@@ -105,9 +115,32 @@ def stop_backend(process: subprocess.Popen[str]) -> None:
         process.stderr.close()
 
 
+def runtime_sqlite_gates(candidate: Path) -> dict[str, Any]:
+    """Capture SQLite gates from the same StateStore connection contract."""
+
+    with StateStore(candidate, initialize=False) as store:
+        with store.connection() as connection:
+            journal_mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar()
+            foreign_keys = connection.exec_driver_sql("PRAGMA foreign_keys").scalar()
+            busy_timeout = connection.exec_driver_sql("PRAGMA busy_timeout").scalar()
+            integrity = connection.exec_driver_sql("PRAGMA integrity_check").scalar()
+            foreign_key_violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    return {
+        "journal_mode": str(journal_mode).lower(),
+        "foreign_keys": int(foreign_keys),
+        "busy_timeout": int(busy_timeout),
+        "integrity_check": str(integrity),
+        "foreign_key_violations": [tuple(row) for row in foreign_key_violations],
+    }
+
+
 def run_http_gate(port: int, persisted_fixture: str | None = None) -> dict[str, Any]:
     health_status, health = request_json(port, "GET", "/api/health")
-    if health_status != 200 or health.get("runtime_mode") != "v5":
+    if (
+        health_status != 200
+        or health.get("runtime_mode") != "v5"
+        or health.get("ready") is not True
+    ):
         raise AssertionError(f"health gate failed: status={health_status} payload={health}")
     status, projects = request_json(port, "GET", "/api/v2/projects")
     if status != 200 or not projects.get("projects"):
@@ -136,6 +169,8 @@ def run_http_gate(port: int, persisted_fixture: str | None = None) -> dict[str, 
     for name, method, path, body, expected in requests:
         actual, _payload = request_json(port, method, path, body)
         checks.append((name, actual, expected))
+
+    doctor_status, doctor = request_json(port, "GET", "/api/system/doctor")
 
     fixture_name = f"T03R3_SMOKE_SOL_{uuid4().hex[:8].upper()}"
     created_status, created = request_json(
@@ -205,6 +240,8 @@ def run_http_gate(port: int, persisted_fixture: str | None = None) -> dict[str, 
         "fixture_id": fixture_id,
         "persisted_fixture": persisted_fixture,
         "gateway": {"retired_v3": retired_status, "unsupported_v5_write": unsupported_status},
+        "doctor": doctor,
+        "doctor_status": doctor_status,
     }
 
 
@@ -247,16 +284,25 @@ def cleanup_probe_fixtures(candidate: Path, fixture_ids: list[str]) -> dict[str,
     allowed_prefixes = ("T03R2_", "T03R3_SMOKE_SOL_")
     if not fixture_ids or any(not item.startswith(allowed_prefixes) for item in fixture_ids):
         raise AssertionError(f"refusing unsafe probe cleanup IDs: {fixture_ids}")
-    with StateStore(candidate, initialize=False) as store:
-        with store.transaction() as connection:
-            events = metadata.tables["events"]
-            sequences = metadata.tables["sequences"]
-            projects = metadata.tables["projects"]
-            entity_ids = [*fixture_ids, *(f"{item}:SQ001" for item in fixture_ids)]
-            connection.execute(delete(events).where(events.c.entity_id.in_(entity_ids)))
-            connection.execute(delete(sequences).where(sequences.c.project_id.in_(fixture_ids)))
-            connection.execute(delete(projects).where(projects.c.id.in_(fixture_ids)))
-        remaining = [item for item in fixture_ids if store.get_project(item) is not None]
+    last_error: Exception | None = None
+    for _attempt in range(20):
+        try:
+            with StateStore(candidate, initialize=False) as store:
+                with store.transaction() as connection:
+                    events = metadata.tables["events"]
+                    sequences = metadata.tables["sequences"]
+                    projects = metadata.tables["projects"]
+                    entity_ids = [*fixture_ids, *(f"{item}:SQ001" for item in fixture_ids)]
+                    connection.execute(delete(events).where(events.c.entity_id.in_(entity_ids)))
+                    connection.execute(delete(sequences).where(sequences.c.project_id.in_(fixture_ids)))
+                    connection.execute(delete(projects).where(projects.c.id.in_(fixture_ids)))
+                remaining = [item for item in fixture_ids if store.get_project(item) is not None]
+            break
+        except Exception as exc:
+            last_error = exc
+            time.sleep(0.25)
+    else:
+        raise RuntimeError(f"formal launcher probe cleanup could not reopen candidate: {last_error}") from last_error
     if remaining:
         raise AssertionError(f"formal launcher probe fixture cleanup failed: {remaining}")
     return {"removed": fixture_ids, "remaining": remaining, "passed": True}
@@ -269,6 +315,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8877)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--production-like",
+        action="store_true",
+        help="use production=true semantics against an explicitly isolated simulation database",
+    )
     return parser.parse_args()
 
 
@@ -294,11 +345,16 @@ def main() -> int:
         runtime_mode="v5",
         runtime_db=candidate,
         legacy_readonly_db=legacy,
-        production=False,
+        production=args.production_like,
         generated_by="scripts.verify_t03_sol_final",
-        cutover_run_id="isolated-final-verification",
+        cutover_run_id=(
+            "isolated-production-like-verification"
+            if args.production_like
+            else "isolated-final-verification"
+        ),
     )
     write_runtime_startup_config(config, config_path)
+    sqlite_gates = runtime_sqlite_gates(candidate)
     environment = os.environ.copy()
     for name in (
         "FRAMEFLOW_RUNTIME_MODE",
@@ -306,10 +362,13 @@ def main() -> int:
         "FRAMEFLOW_DB_PATH",
         "FRAMEFLOW_LEGACY_READONLY_DB",
         "FRAMEFLOW_V5_PRODUCTION",
+        "FRAMEFLOW_V5_PRODUCTION_SIMULATION",
     ):
         environment.pop(name, None)
     environment["FRAMEFLOW_RUNTIME_CONFIG"] = str(config_path)
     environment["FRAMEFLOW_BIND_HOST"] = "127.0.0.1"
+    if args.production_like:
+        environment["FRAMEFLOW_V5_PRODUCTION_SIMULATION"] = "1"
 
     results: list[dict[str, Any]] = []
     persisted_fixture: str | None = None
@@ -364,13 +423,19 @@ def main() -> int:
         ],
         "candidate": str(candidate),
         "candidate_info": candidate_info,
+        "runtime_sqlite_gates": sqlite_gates,
         "candidate_post_probe_info": candidate_post_probe,
         "candidate_sha256_after_probe": candidate_sha256_after_probe,
         "probe_fixture_cleanup": fixture_cleanup,
         "legacy": str(legacy),
         "runtime_config": str(config_path),
         "runtime_config_payload": json.loads(config_path.read_text(encoding="utf-8")),
-        "runtime_environment_fields_injected": ["FRAMEFLOW_RUNTIME_CONFIG", "FRAMEFLOW_BIND_HOST"],
+        "runtime_environment_fields_injected": [
+            "FRAMEFLOW_RUNTIME_CONFIG",
+            "FRAMEFLOW_BIND_HOST",
+            *( ["FRAMEFLOW_V5_PRODUCTION_SIMULATION"] if args.production_like else [] ),
+        ],
+        "production_like_simulation": args.production_like,
         "ownership_environment_fields_injected": [],
         "legacy_read_only": verify_read_only(legacy),
         "boots": results,

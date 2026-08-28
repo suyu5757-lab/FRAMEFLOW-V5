@@ -12,6 +12,7 @@ import sqlite3
 from copy import deepcopy
 from contextlib import contextmanager
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Mapping
 
 from jsonschema import Draft202012Validator
@@ -127,6 +128,85 @@ class LegacyReadOnlyCompatibility:
 
     def get_shot(self, shot_id: str) -> dict[str, Any] | None:
         return next((item for item in self.list_shots() if item["id"] == shot_id), None)
+
+    def provider_readiness_inputs(
+        self, capabilities: Sequence[str]
+    ) -> dict[str, Any]:
+        """Return provider state for readiness without exposing a write path.
+
+        Provider persistence is not part of the V5 StateStore schema yet. The
+        cutover archive is the authoritative frozen read-only snapshot for the
+        startup readiness projection until that later persistence task exists.
+        Secrets are intentionally not read; readiness uses only the same
+        enabled/last-health/model predicates as Legacy.
+        """
+
+        profiles: dict[str, dict[str, Any]] = {}
+        bindings: dict[str, dict[str, Any]] = {}
+        source: dict[str, Any] = {
+            "kind": "legacy_readonly_archive",
+            "path": str(self.path),
+            "available": False,
+        }
+        with self.connection() as connection:
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            required_tables = {"provider_profiles", "capability_bindings"}
+            missing_tables = sorted(required_tables - tables)
+            if missing_tables:
+                source["reason"] = f"missing provider tables: {missing_tables}"
+                return {"profiles": profiles, "bindings": bindings, "source": source}
+
+            profile_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(provider_profiles)").fetchall()
+            }
+            binding_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(capability_bindings)").fetchall()
+            }
+            missing_columns = sorted(
+                ({"id", "provider_type", "display_name", "enabled", "last_health_json"} - profile_columns)
+                | ({"capability", "provider_profile_id", "model"} - binding_columns)
+            )
+            if missing_columns:
+                source["reason"] = f"missing provider columns: {missing_columns}"
+                return {"profiles": profiles, "bindings": bindings, "source": source}
+
+            profile_rows = connection.execute(
+                "SELECT id, provider_type, display_name, enabled, last_health_json "
+                "FROM provider_profiles ORDER BY id"
+            ).fetchall()
+            for row in profile_rows:
+                last_health = _json(row["last_health_json"])
+                profiles[str(row["id"])] = {
+                    "id": str(row["id"]),
+                    "provider_type": row["provider_type"],
+                    "display_name": row["display_name"],
+                    "enabled": bool(row["enabled"]),
+                    "last_health": last_health if isinstance(last_health, dict) else {},
+                }
+            binding_rows = connection.execute(
+                "SELECT capability, provider_profile_id, model "
+                "FROM capability_bindings ORDER BY capability"
+            ).fetchall()
+            requested = set(str(item) for item in capabilities)
+            for row in binding_rows:
+                capability = str(row["capability"])
+                if capability in requested:
+                    bindings[capability] = {
+                        "capability": capability,
+                        "provider_profile_id": row["provider_profile_id"],
+                        "model": row["model"],
+                    }
+        source["available"] = True
+        source["profile_count"] = len(profiles)
+        source["binding_count"] = len(bindings)
+        return {"profiles": profiles, "bindings": bindings, "source": source}
 
     def write(self, *_args: Any, **_kwargs: Any) -> None:
         raise LegacyReadOnlyError("legacy compatibility archive is read-only")

@@ -39,7 +39,7 @@ def _formal_evidence(candidate: Path, archive: Path) -> dict[str, object]:
     def boot(name: str) -> dict[str, object]:
         return {
             "boot": name,
-            "health": {"runtime_mode": "v5"},
+            "health": {"runtime_mode": "v5", "status": "ready", "ready": True},
             "api_passed": 19,
             "api_failed": 0,
             "historical_passed": 17,

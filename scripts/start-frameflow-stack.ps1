@@ -133,6 +133,7 @@ function Test-ExpectedRuntime {
         return $false
     }
     return $health.runtime_mode -eq [string]$Target.mode -and
+        ([string]$Target.mode -ne 'v5' -or $health.ready -eq $true) -and
         [IO.Path]::GetFullPath([string]$doctor.database) -eq [IO.Path]::GetFullPath([string]$Target.runtime_db)
 }
 
@@ -148,6 +149,14 @@ function Assert-ExpectedRuntime {
     }
     if ($health.runtime_mode -ne [string]$Target.mode) {
         throw "Runtime mode mismatch: expected=$($Target.mode) actual=$($health.runtime_mode)."
+    }
+    if ([string]$Target.mode -eq 'v5' -and $health.ready -ne $true) {
+        $failing = if ($health.readiness -and $health.readiness.failing_predicates) {
+            ($health.readiness.failing_predicates -join ',')
+        } else {
+            'not_reported'
+        }
+        throw "V5 readiness gate failed: status=$($health.status) ready=$($health.ready) failing_predicates=$failing."
     }
     if ([IO.Path]::GetFullPath([string]$doctor.database) -ne [IO.Path]::GetFullPath([string]$Target.runtime_db)) {
         throw "Runtime database mismatch: expected=$($Target.runtime_db) actual=$($doctor.database)."

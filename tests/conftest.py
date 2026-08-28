@@ -157,6 +157,43 @@ def create_legacy_v3_fixture(path: Path) -> Path:
             "workflow_templates_v3",
         ):
             connection.execute(f'CREATE TABLE "{table_name}" (id TEXT PRIMARY KEY)')
+        connection.executescript(
+            """
+            ALTER TABLE provider_profiles ADD COLUMN provider_type TEXT;
+            ALTER TABLE provider_profiles ADD COLUMN display_name TEXT;
+            ALTER TABLE provider_profiles ADD COLUMN enabled INTEGER;
+            ALTER TABLE provider_profiles ADD COLUMN last_health_json TEXT;
+            ALTER TABLE capability_bindings ADD COLUMN capability TEXT;
+            ALTER TABLE capability_bindings ADD COLUMN provider_profile_id TEXT;
+            ALTER TABLE capability_bindings ADD COLUMN model TEXT;
+            """
+        )
+        connection.executemany(
+            "INSERT INTO provider_profiles(id,provider_type,display_name,enabled,last_health_json) VALUES(?,?,?,?,?)",
+            (
+                (
+                    "opencode-default",
+                    "opencode",
+                    "OpenCode Agent",
+                    1,
+                    json.dumps({"ok": True, "models": ["opencode-go/gpt-5.6-luna"]}),
+                ),
+                (
+                    "jimeng-default",
+                    "jimeng_cli",
+                    "即梦 CLI",
+                    1,
+                    json.dumps({"ok": True, "models": ["seedance2.0fast"]}),
+                ),
+            ),
+        )
+        connection.executemany(
+            "INSERT INTO capability_bindings(id,capability,provider_profile_id,model) VALUES(?,?,?,?)",
+            (
+                ("binding-orchestrator", "orchestrator", "opencode-default", "opencode-go/gpt-5.6-luna"),
+                ("binding-video", "video", "jimeng-default", "seedance2.0fast"),
+            ),
+        )
         now = "2026-08-28T00:00:00+00:00"
         connection.execute("INSERT INTO schema_migrations VALUES(16, ?)", (now,))
         connection.execute(

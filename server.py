@@ -41,6 +41,7 @@ from frameflow.workflows import WORKFLOWS, evaluate_project_gates, workflow_mani
 from frameflow.story import story_checks, story_document
 from frameflow.upload_storage import UploadTooLarge, cleanup_file, cleanup_staged_upload, finalize_staged_upload, stage_upload
 from core.runtime.persistence import RuntimeModeError, RuntimePersistence, RuntimePersistenceError, create_runtime_persistence, resolve_runtime_environment, resolve_runtime_mode
+from core.runtime.readiness import evaluate_capabilities, readiness_summary
 
 ROOT=Path(__file__).resolve().parent; DATA_DIR=ROOT/"data"; DEFAULT_DATA_DIR=DATA_DIR; GENERATED_DIR=ROOT/"generated"; STUDIO_DIST=ROOT/"web"/"dist"; GENERATED_AUDIO_DIR=GENERATED_DIR/"audio"; REFERENCE_AUDIO_DIR=GENERATED_AUDIO_DIR/"references"
 RUNTIME_ENVIRONMENT=resolve_runtime_environment()
@@ -530,54 +531,33 @@ def _effective_capabilities(database: Database) -> dict[str, dict[str, Any]]:
     with database.connect() as connection:
         bindings = {row["capability"]: dict(row) for row in connection.execute("SELECT * FROM capability_bindings").fetchall()}
         profiles = {row["id"]: row_profile(database, row) for row in connection.execute("SELECT * FROM provider_profiles").fetchall()}
-    result: dict[str, dict[str, Any]] = {}
-    for capability in CAPABILITIES:
-        binding = bindings.get(capability)
-        profile = profiles.get(str(binding.get("provider_profile_id"))) if binding else None
-        health = profile.get("last_health") if profile else None
-        healthy = bool(profile and profile.get("enabled") and isinstance(health, dict) and health.get("ok") is True)
-        model = str(binding.get("model") or "") if binding else ""
-        models = [str(item) for item in (health or {}).get("models", []) if item]
-        model_ready = not model or not models or model in models
-        ready = healthy and model_ready
-        result[capability] = {
-            "ready": ready,
-            "status": "ready" if ready else "not_ready",
-            "provider_profile_id": profile.get("id") if profile else None,
-            "provider": profile.get("display_name") if profile else None,
-            "model": model or None,
-            "health": health.get("ok") if isinstance(health, dict) else None,
-            "reason": None if ready else ("unbound" if not binding else "provider_unhealthy_or_model_unavailable"),
-        }
-    return result
+    return evaluate_capabilities(bindings, profiles, capabilities=CAPABILITIES)
 
 
 @app.get("/api/health")
 async def health(request:Request):
     database = db(request)
     capabilities = _effective_capabilities(database)
-    effective = {key: bool(value["ready"]) for key, value in capabilities.items()}
-    required_ready = effective.get("orchestrator", False)
-    media_ready = any(effective.get(key, False) for key in ("image", "video", "tts", "music", "sfx"))
-    status = "ready" if required_ready and media_ready else "degraded" if required_ready or media_ready else "not_ready"
+    readiness = readiness_summary(capabilities)
     openai = None
     try:
         openai = get_profile(database, "openai-default")
     except HTTPException:
         pass
     return {
-        "status": status,
-        "ok": status != "not_ready",
-        "ready": status == "ready",
-        "degraded": status == "degraded",
+        "status": readiness["status"],
+        "ok": readiness["ok"],
+        "ready": readiness["ready"],
+        "degraded": readiness["degraded"],
         "runtime_mode": "legacy",
         "version": app.version,
         "schema_version": SCHEMA_VERSION,
         "openai_configured": bool(openai and openai["credential_configured"]),
-        "audio": bool(effective.get("tts") or effective.get("music") or effective.get("sfx")),
-        "images": bool(effective.get("image") or effective.get("image_edit")),
-        "seedance": bool(effective.get("video")),
+        "audio": bool(capabilities.get("tts", {}).get("ready") or capabilities.get("music", {}).get("ready") or capabilities.get("sfx", {}).get("ready")),
+        "images": bool(capabilities.get("image", {}).get("ready") or capabilities.get("image_edit", {}).get("ready")),
+        "seedance": bool(capabilities.get("video", {}).get("ready")),
         "capabilities": capabilities,
+        "readiness": readiness,
     }
 @app.get("/api/system/doctor")
 async def doctor(request:Request):
