@@ -170,6 +170,67 @@ Runtime source of truth = LEGACY_V3
 READY FOR FINAL PRODUCTION CUTOVER = YES
 ```
 
+## FINAL_PRESWAP_TRIPLE_GATE_CLOSURE_2026-08-28
+
+The failed run `T03FINAL-20260828T140500Z-0b2dc631` was preserved as a
+pre-swap abort. No Production replacement was attempted. Its final three
+pre-swap defects were positively identified:
+
+```text
+Archive readonly = FAIL because only legacy_frameflow_v3.db had the
+  ReadOnly attribute; the four JSON/Markdown artifacts remained writable.
+Runtime config THIS RUN = NO because runtime-startup.json was a target path
+  only and perform_production_cutover was never called after the earlier gate
+  failure.
+Maintenance freshness = NOT_EVALUATED because the A0/B0 gate aborted before
+  the final freshness predicate; the two-hour token itself was not expired.
+Formal interpreter path discrepancy = REPORTING_TYPO; actual execution used
+  D:\11067\CodexWorkspaces\frameflow-v3\.venv\Scripts\python.exe.
+```
+
+The closure added fail-closed controls for the five-file permanent archive,
+current-run runtime configuration binding, and maintenance freshness. The
+archive contract is all five artifacts ReadOnly, not only the database. The
+config contract distinguishes the target path from file existence and binds
+`runtime_mode=v5`, the canonical runtime database, this run's archive, and the
+current `cutover_run_id`. The freshness contract checks an active bounded TTL,
+paused startup tasks, no respawn, stored FREE state, and a fresh live FREE
+probe.
+
+The no-swap formal harness used the corrected `A0_MIGRATION_BASELINE` and
+`B0_MIGRATION_BASELINE` constants and completed:
+
+```text
+Run = T03-TRIPLE-GATE-20260828T144221Z-b92a6c72
+Archive readonly = PASS
+Runtime config THIS RUN = PASS
+Maintenance fresh immediately pre-swap = PASS
+Candidate A first/restart = ready=true; 19/19 + 17/17 twice
+Candidate A final stabilization = PASS; four stable samples; WAL/SHM absent
+Candidate B backend-opened = NO; validation = PASS; rename = PASS
+A0/B0 equivalence = PASS
+ALL PRE_SWAP GATES = PASS
+perform_production_cutover = NOT_CALLED
+Production DB touched = NO
+```
+
+New regression results:
+
+```text
+focused = 55 passed
+schema/migration/runtime = 135 passed
+V3 = 37 passed
+full suite = 273 passed
+failed = 0
+errors = 0
+blocked = 0
+```
+
+Independent Production audit after the dry-run remained Legacy V3: 41 tables,
+schema 16, integrity `ok`, zero foreign-key violations, healthy Legacy on
+8787, and `runtime-startup.json` absent. This closure does not authorize a
+future Production swap.
+
 ## CANDIDATE_A_FORMAL_EVIDENCE_STABILIZATION_CLOSURE_2026-08-28
 
 The prior `T03FINAL-20260828T122832Z-bab2dd19` pre-swap abort is retained as
