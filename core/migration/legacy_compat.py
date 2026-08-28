@@ -18,6 +18,7 @@ from typing import Any, Mapping
 from jsonschema import Draft202012Validator
 
 from scripts.migrate_shot_spec_v1_to_v2_2 import migrate_shot_spec_v1_to_v2_2
+from .candidate_b_lifecycle import assert_candidate_b_database_open_allowed
 
 
 SHOT_SCHEMA_PATH = (
@@ -66,6 +67,7 @@ class LegacyReadOnlyCompatibility:
     def _connection(self) -> sqlite3.Connection:
         connection: sqlite3.Connection | None = None
         try:
+            assert_candidate_b_database_open_allowed(self.path)
             connection = sqlite3.connect(
                 f"file:{self.path.as_posix()}?mode=ro&immutable=1", uri=True, timeout=5
             )
@@ -225,6 +227,7 @@ def inspect_legacy_archive(path: Path | str) -> dict[str, Any]:
     """Fail closed unless *path* is a healthy FRAMEFLOW Legacy V3 archive."""
 
     resolved = Path(path).expanduser().resolve(strict=False)
+    assert_candidate_b_database_open_allowed(resolved)
     if not resolved.is_file():
         raise LegacyReadOnlyError(f"legacy archive does not exist: {resolved}")
     connection: sqlite3.Connection | None = None

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from core.schemas.runtime_mvp import RUNTIME_TABLE_NAMES
+from core.migration.candidate_b_lifecycle import assert_candidate_b_database_open_allowed
 
 from .store import DEFAULT_DATABASE_PATH, StateStore
 
@@ -50,6 +51,7 @@ def _resolve(path: Path | str | None) -> Path:
 
 
 def _read_only(path: Path) -> sqlite3.Connection:
+    assert_candidate_b_database_open_allowed(path)
     if not path.is_file():
         raise RuntimeOwnershipError(f"runtime database does not exist: {path}")
     connection: sqlite3.Connection | None = None

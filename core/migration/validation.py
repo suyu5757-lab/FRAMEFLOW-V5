@@ -10,6 +10,7 @@ from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 
 from core.schemas.runtime_mvp import RUNTIME_TABLE_NAMES, metadata
 
+from .candidate_b_lifecycle import assert_candidate_b_database_open_allowed
 
 INTERNAL_TABLES = {"alembic_version", "sqlite_sequence"}
 
@@ -20,6 +21,7 @@ class CandidateValidationError(RuntimeError):
 
 def _read_only(path: Path | str) -> sqlite3.Connection:
     candidate = Path(path).expanduser().resolve(strict=False)
+    assert_candidate_b_database_open_allowed(candidate)
     if not candidate.is_file():
         raise CandidateValidationError(f"candidate database does not exist: {candidate}")
     # Candidate validation must see a just-created WAL if migration has not

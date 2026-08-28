@@ -18,6 +18,7 @@ from sqlalchemy import Engine, create_engine, event, inspect, insert, select, te
 from sqlalchemy.engine import Connection
 
 from core.schemas.runtime_mvp import metadata
+from core.migration.candidate_b_lifecycle import assert_candidate_b_database_open_allowed
 
 
 DEFAULT_DATABASE_PATH = Path(
@@ -65,6 +66,7 @@ class StateStore:
     ) -> None:
         raw_path = path if path is not None else DEFAULT_DATABASE_PATH
         self.path = raw_path if str(raw_path) == ":memory:" else Path(raw_path).resolve(strict=False)
+        assert_candidate_b_database_open_allowed(self.path)
         self.database_url = _database_url(raw_path)
         self._closed = False
         self.engine = create_engine(

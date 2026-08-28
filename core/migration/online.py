@@ -7,6 +7,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
+from .candidate_b_lifecycle import assert_candidate_b_database_open_allowed
 from .backup import PRODUCTION_DATABASE, BackupError
 
 
@@ -16,6 +17,7 @@ ALEMBIC_INI = PROJECT_ROOT / "core" / "migration" / "alembic.ini"
 
 def _candidate(path: Path | str) -> Path:
     candidate = Path(path).expanduser().resolve(strict=False)
+    assert_candidate_b_database_open_allowed(candidate)
     if candidate == PRODUCTION_DATABASE:
         raise BackupError(
             f"T02-R refuses to migrate production: {PRODUCTION_DATABASE}; "

@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .candidate_b_lifecycle import assert_candidate_b_database_open_allowed
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_DATABASE = (PROJECT_ROOT / "data" / "frameflow.db").resolve()
@@ -44,6 +45,7 @@ def _sha256(path: Path) -> str:
 
 
 def _read_only(path: Path) -> sqlite3.Connection:
+    assert_candidate_b_database_open_allowed(path)
     if not path.is_file():
         raise BackupError(f"SQLite source does not exist: {path}")
     connection: sqlite3.Connection | None = None
@@ -117,6 +119,7 @@ def create_backup(source_path: Path | str, backup_path: Path | str) -> dict[str,
 
     source = _resolve(source_path)
     backup = _resolve(backup_path)
+    assert_candidate_b_database_open_allowed(backup)
     _guard_restore_target(backup)
     if source == backup:
         raise BackupError("backup target must differ from source")
@@ -163,6 +166,7 @@ def restore_backup(backup_path: Path | str, target_path: Path | str) -> dict[str
 
     backup = _resolve(backup_path)
     target = _resolve(target_path)
+    assert_candidate_b_database_open_allowed(target)
     _guard_restore_target(target)
     if backup == target:
         raise BackupError("restore target must differ from backup source")

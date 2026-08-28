@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.migration.backup import create_backup
+from core.migration.candidate_b_lifecycle import CandidateBTerminalSeal
 from core.migration.cutover import (
     REQUIRED_LEGACY_SHOTS,
     fingerprint_database,
@@ -265,6 +266,8 @@ def main() -> int:
         run_id=run_id + "-candidate-b",
         manifest_path=candidate_b_root / "migration_manifest.json",
     )
+    candidate_b_lifecycle = CandidateBTerminalSeal(candidate_b)
+    candidate_b_lifecycle.begin_validation()
     b0 = build_candidate_evidence(
         candidate_b,
         source_legacy_sha=legacy_fp["sha256"],
@@ -279,9 +282,14 @@ def main() -> int:
         captured_before_backend=True,
         captured_before_swap=True,
     )
-    b_rename = _rename_physical_evidence(candidate_b)
+    candidate_b_lifecycle.mark_evidence_complete(b0)
+    candidate_b_lifecycle.mark_handles_closed()
+    b_rename = candidate_b_lifecycle.finalize_rename_probe(handle_free_rename_probe)
     b0["rename"] = b_rename
     b0["rename_passed"] = b_rename["passed"]
+    b0["terminal_seal"] = candidate_b_lifecycle.evidence()
+    b0["candidate_b_reopened_after_rename"] = False
+    b0["candidate_b_post_seal_db_open_count"] = candidate_b_lifecycle.post_seal_db_open_count
     _write_json(candidate_b_root / "B0.json", b0)
     final_candidate_gate = verify_final_candidate_gate(a_lifecycle, b0)
     _write_json(run_root / "A0-B0-final-gate.json", final_candidate_gate)
@@ -391,7 +399,9 @@ def main() -> int:
             "backend_opened": b0.get("backend_opened"),
             "validation_passed": b0.get("validation_passed"),
             "rename": b_rename,
-            "reopened_after_rename": False,
+            "reopened_after_rename": candidate_b_lifecycle.post_seal_db_open_count > 0,
+            "post_seal_db_open_count": candidate_b_lifecycle.post_seal_db_open_count,
+            "terminal_seal": candidate_b_lifecycle.evidence(),
         },
         "a0_b0_final_gate": final_candidate_gate,
         "runtime_config": runtime_config,

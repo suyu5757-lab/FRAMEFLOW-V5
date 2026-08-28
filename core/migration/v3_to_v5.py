@@ -24,6 +24,7 @@ from scripts.migrate_shot_spec_v1_to_v2_2 import migrate_shot_spec_v1_to_v2_2
 
 from .backup import PRODUCTION_DATABASE, BackupError, create_backup, write_manifest
 from .online import upgrade_candidate
+from .candidate_b_lifecycle import assert_candidate_b_database_open_allowed
 from .validation import assert_candidate_valid
 
 
@@ -727,6 +728,7 @@ def migrate_v3_to_v5(
     if candidate_path is None:
         raise MigrationError("candidate_path is required unless dry_run=True")
     candidate = _resolve(candidate_path)
+    assert_candidate_b_database_open_allowed(candidate)
     if candidate == PRODUCTION_DATABASE:
         raise MigrationError("production database cannot be a T02-R candidate")
     if candidate.exists():
@@ -742,6 +744,7 @@ def migrate_v3_to_v5(
         target: sqlite3.Connection | None = None
         try:
             legacy = _read_only(migration_source)
+            assert_candidate_b_database_open_allowed(candidate)
             target = sqlite3.connect(candidate)
             target.execute("PRAGMA foreign_keys=ON")
             target.execute("PRAGMA busy_timeout=5000")

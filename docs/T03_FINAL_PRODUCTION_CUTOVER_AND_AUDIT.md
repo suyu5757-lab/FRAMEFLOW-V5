@@ -170,6 +170,68 @@ Runtime source of truth = LEGACY_V3
 READY FOR FINAL PRODUCTION CUTOVER = YES
 ```
 
+## Candidate B terminal seal closure — 2026-08-28
+
+The failed run `T03FINAL-20260828T151315Z-48f5ec56` is preserved as historical
+`PRE_SWAP_ABORT` evidence. Its only unresolved defect was
+`CANDIDATE_B_POST_RENAME_REOPEN`: the run-local rename helper recomputed a
+logical fingerprint after the final Candidate B rename, reopening the file
+through a read-only `sqlite3` connection. Candidate B was not modified and
+its logical state did not change.
+
+The closure is documented in
+`docs/T03_CANDIDATE_B_TERMINAL_SEAL_CLOSURE.md`. Candidate B now has an
+explicit terminal lifecycle ending in `SEALED`; all known database-open
+boundaries fail closed after sealing. The final rename is filesystem-only and
+all logical equivalence, schema, PK, row-accounting, integrity, FK, and SQLite
+contract evidence is captured before the seal.
+
+Fresh isolated certification:
+
+```text
+Run = T03-TRIPLE-GATE-20260828T154604Z-e9990c3d
+Candidate B backend-opened = NO
+Candidate B validation = PASS
+Candidate B handles closed = YES
+Candidate B rename = PASS
+Candidate B reopened after rename = NO
+Candidate B post-seal DB open count = 0
+Candidate B state = SEALED
+A0/B0 equivalence = PASS
+Archive = 5/5 readonly
+Runtime config THIS RUN = YES
+Maintenance freshness = PASS
+ALL PRE_SWAP GATES = PASS
+perform_production_cutover = NOT_CALLED
+Production DB touched = NO
+```
+
+Post-closure regressions:
+
+```text
+Focused = 63 passed
+Schema/migration/runtime = 137 passed
+V3 = 37 passed
+Post-cutover DB contract = 1 passed
+Git safety = 10 passed
+Full suite = 275 passed
+Failed = 0
+Errors = 0
+Blocked = 0
+```
+
+Independent Production audit remains Legacy V3: canonical path unchanged,
+41 tables, schema 16, integrity `ok`, zero FK violations, HTTP 200,
+`runtime_mode=legacy`, `status=ready`, `ready=true`, and
+`runtime-startup.json` absent. No Production replacement or migration was
+performed.
+
+```text
+STATUS = PASS
+PRODUCTION CUTOVER = NOT_PERFORMED
+READY FOR NEW FINAL PRODUCTION CUTOVER AUTHORIZATION = YES
+```
+
 ## FINAL_PRESWAP_TRIPLE_GATE_CLOSURE_2026-08-28
 
 The failed run `T03FINAL-20260828T140500Z-0b2dc631` was preserved as a

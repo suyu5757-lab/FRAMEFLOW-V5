@@ -26,6 +26,7 @@ from core.runtime.state_store.factory import (
     inspect_database,
     open_runtime_store,
 )
+from core.migration.candidate_b_lifecycle import assert_candidate_b_database_open_allowed
 from core.runtime.persistence.startup_config import (
     DEFAULT_RUNTIME_CONFIG_PATH,
     RuntimeStartupConfig,
@@ -159,6 +160,7 @@ def checkpoint_database(path: Path | str) -> dict[str, Any]:
     """Checkpoint a closed-file candidate with an explicit connection close."""
 
     resolved = Path(path).expanduser().resolve(strict=False)
+    assert_candidate_b_database_open_allowed(resolved)
     if not resolved.is_file():
         raise CutoverBlocked(f"checkpoint target does not exist: {resolved}")
     connection = sqlite3.connect(str(resolved), timeout=5)

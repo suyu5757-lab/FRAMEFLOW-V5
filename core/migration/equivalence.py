@@ -17,6 +17,10 @@ from typing import Any, Iterable, Mapping
 
 from core.schemas.runtime_mvp import RUNTIME_TABLE_NAMES
 
+from .candidate_b_lifecycle import (
+    CandidateBSealError,
+    assert_candidate_b_database_open_allowed,
+)
 from .legacy_compat import account_legacy_shots
 from .v3_to_v5 import inspect_legacy_database
 from .validation import validate_candidate
@@ -62,6 +66,7 @@ def _quote(identifier: str) -> str:
 
 def _read_only(path: Path | str) -> sqlite3.Connection:
     resolved = _resolve(path)
+    assert_candidate_b_database_open_allowed(resolved)
     if not resolved.is_file():
         raise CandidateEquivalenceError(f"candidate database does not exist: {resolved}")
     query = "mode=ro"
@@ -788,6 +793,26 @@ def verify_final_candidate_gate(
     if not checks["candidate_b_rename"]:
         errors.append("Candidate B rename probe must pass")
 
+    terminal_seal = candidate_b0.get("terminal_seal")
+    checks["candidate_b_terminal_seal"] = (
+        isinstance(terminal_seal, Mapping)
+        and terminal_seal.get("state") == "SEALED"
+    )
+    checks["candidate_b_reopened_after_rename"] = (
+        isinstance(terminal_seal, Mapping)
+        and terminal_seal.get("candidate_b_reopened_after_rename") is False
+    )
+    checks["candidate_b_post_seal_db_open_count"] = (
+        isinstance(terminal_seal, Mapping)
+        and int(terminal_seal.get("candidate_b_post_seal_db_open_count") or 0) == 0
+    )
+    if not checks["candidate_b_terminal_seal"]:
+        errors.append("Candidate B terminal SEALED evidence is missing")
+    if not checks["candidate_b_reopened_after_rename"]:
+        errors.append("Candidate B was reopened after final rename")
+    if not checks["candidate_b_post_seal_db_open_count"]:
+        errors.append("Candidate B post-seal database open count is non-zero")
+
     accounting = candidate_b0.get("row_accounting")
     if not isinstance(accounting, Mapping):
         errors.append("row accounting evidence missing")
@@ -813,6 +838,7 @@ __all__ = [
     "A0_STAGE",
     "A1_STAGE",
     "B0_STAGE",
+    "CandidateBSealError",
     "CandidateEquivalenceError",
     "MIGRATION_IMPLEMENTATION_VERSION",
     "MIGRATION_REVISION",

@@ -76,6 +76,16 @@ def _evidence(
             "rename_passed": True,
         }
     )
+    if stage == B0_STAGE:
+        evidence["terminal_seal"] = {
+            "candidate": str(path.resolve()),
+            "state": "SEALED",
+            "candidate_db_open_count": 3,
+            "candidate_b_post_seal_db_open_count": 0,
+            "post_seal_db_open_count": 0,
+            "post_seal_db_open_attempts": 0,
+            "candidate_b_reopened_after_rename": False,
+        }
     evidence.update(changes)
     return evidence
 
