@@ -1,11 +1,17 @@
 [CmdletBinding()]
 param(
-    [switch]$OpenBrowser
+    [switch]$OpenBrowser,
+    [switch]$RuntimeOnly,
+    [switch]$AllowDuringMaintenance,
+    [string]$RuntimeConfigPath = '',
+    [int]$Port = 8787,
+    [string]$BindHost = '127.0.0.1'
 )
 
 $ErrorActionPreference = 'Stop'
 
 $frameflowRoot = 'D:\11067\CodexWorkspaces\frameflow-v3'
+$formalPython = Join-Path $frameflowRoot '.venv\Scripts\python.exe'
 $logDirectory = Join-Path $frameflowRoot 'data\logs'
 $logPath = Join-Path $logDirectory 'frameflow-runtime-startup.log'
 $openCodeTask = 'FRAMEFLOW OpenCode Agent Runtime'
@@ -19,9 +25,15 @@ function Write-StackLog {
     Add-Content -LiteralPath $logPath -Value ('{0:u} {1}' -f (Get-Date), $Message)
 }
 
+function Get-ListenerPids {
+    param([int]$ListenerPort)
+    $matches = @(netstat -ano -p tcp | Select-String (':{0}\s+\S+\s+LISTENING\s+(\d+)\s*$' -f $ListenerPort))
+    return @($matches | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Select-Object -Unique)
+}
+
 function Test-Listener {
-    param([int]$Port)
-    return $null -ne (Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    param([int]$ListenerPort)
+    return @(Get-ListenerPids -ListenerPort $ListenerPort).Count -gt 0
 }
 
 function Wait-Until {
@@ -52,12 +64,22 @@ function Test-OpenCodeHealthy {
     }
 }
 
-function Test-FormalFrameflow {
+function Get-TargetValidation {
+    if (-not (Test-Path -LiteralPath $formalPython)) {
+        throw "Formal interpreter is missing: $formalPython"
+    }
+    $arguments = @('-m', 'core.runtime.production_launcher', '--validate-only')
+    if ($RuntimeConfigPath -and $RuntimeConfigPath.Trim()) {
+        $arguments += @('--config', [IO.Path]::GetFullPath($RuntimeConfigPath))
+    }
+    $rendered = (& $formalPython @arguments 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Runtime target validation failed: $rendered"
+    }
     try {
-        $doctor = Invoke-RestMethod -UseBasicParsing -Uri 'http://127.0.0.1:8787/api/system/doctor' -TimeoutSec 2
-        return $doctor.frontend_dist -like "$frameflowRoot\web\dist*" -and $doctor.database -eq "$frameflowRoot\data\frameflow.db"
+        return $rendered | ConvertFrom-Json
     } catch {
-        return $false
+        throw "Runtime target validation returned invalid evidence: $rendered"
     }
 }
 
@@ -71,17 +93,107 @@ function Assert-CutoverMaintenanceInactive {
     } catch {
         throw "Invalid cutover maintenance token blocks runtime startup: $maintenancePath"
     }
-    if ($expires -gt [DateTimeOffset]::UtcNow) {
-        throw "Cutover maintenance is active; runtime startup is paused by $maintenancePath"
+    if ($expires -le [DateTimeOffset]::UtcNow) {
+        Write-StackLog "Ignoring expired cutover maintenance token: $maintenancePath"
+        return
     }
-    Write-StackLog "Ignoring expired cutover maintenance token: $maintenancePath"
+    if ($AllowDuringMaintenance -and $state.allow_runtime_start -eq $true) {
+        Write-StackLog 'Explicit target runtime start permitted by the active maintenance token.'
+        return
+    }
+    throw "Cutover maintenance is active; runtime startup is paused by $maintenancePath"
+}
+
+function Get-RuntimeHealth {
+    param([int]$HealthPort)
+    try {
+        return Invoke-RestMethod -UseBasicParsing -Uri ("http://127.0.0.1:{0}/api/health" -f $HealthPort) -TimeoutSec 2
+    } catch {
+        return $null
+    }
+}
+
+function Get-RuntimeDoctor {
+    param([int]$HealthPort)
+    try {
+        return Invoke-RestMethod -UseBasicParsing -Uri ("http://127.0.0.1:{0}/api/system/doctor" -f $HealthPort) -TimeoutSec 2
+    } catch {
+        return $null
+    }
+}
+
+function Test-ExpectedRuntime {
+    param(
+        [object]$Target,
+        [int]$HealthPort
+    )
+    $health = Get-RuntimeHealth -HealthPort $HealthPort
+    $doctor = Get-RuntimeDoctor -HealthPort $HealthPort
+    if (-not $health -or -not $doctor) {
+        return $false
+    }
+    return $health.runtime_mode -eq [string]$Target.mode -and
+        [IO.Path]::GetFullPath([string]$doctor.database) -eq [IO.Path]::GetFullPath([string]$Target.runtime_db)
+}
+
+function Assert-ExpectedRuntime {
+    param(
+        [object]$Target,
+        [int]$HealthPort
+    )
+    $health = Get-RuntimeHealth -HealthPort $HealthPort
+    $doctor = Get-RuntimeDoctor -HealthPort $HealthPort
+    if (-not $health -or -not $doctor) {
+        throw "Expected $($Target.mode) runtime did not return health and doctor evidence on port $HealthPort."
+    }
+    if ($health.runtime_mode -ne [string]$Target.mode) {
+        throw "Runtime mode mismatch: expected=$($Target.mode) actual=$($health.runtime_mode)."
+    }
+    if ([IO.Path]::GetFullPath([string]$doctor.database) -ne [IO.Path]::GetFullPath([string]$Target.runtime_db)) {
+        throw "Runtime database mismatch: expected=$($Target.runtime_db) actual=$($doctor.database)."
+    }
+    return [ordered]@{
+        Health = $health
+        Doctor = $doctor
+        ListenerPids = @(Get-ListenerPids -ListenerPort $HealthPort)
+    }
+}
+
+function Start-FormalRuntime {
+    param([object]$Target)
+    $arguments = @(
+        '-m', 'core.runtime.production_launcher', '--start',
+        '--host', $BindHost, '--port', "$Port"
+    )
+    if ($RuntimeConfigPath -and $RuntimeConfigPath.Trim()) {
+        $arguments += @('--config', [IO.Path]::GetFullPath($RuntimeConfigPath))
+    }
+    $rendered = (& $formalPython @arguments 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Formal mode-aware runtime launcher failed for $($Target.mode): $rendered"
+    }
+    Write-StackLog "Explicitly started $($Target.mode) runtime through $formalPython."
+    return $rendered | ConvertFrom-Json
 }
 
 try {
-    Write-StackLog 'Starting FRAMEFLOW runtime stack.'
+    Write-StackLog 'Starting FRAMEFLOW mode-aware runtime stack.'
     Assert-CutoverMaintenanceInactive
+    $target = Get-TargetValidation
 
-    if (-not (Test-Listener -Port 4096)) {
+    if ($RuntimeOnly) {
+        if (-not (Test-Listener -ListenerPort $Port)) {
+            [void](Start-FormalRuntime -Target $target)
+        } else {
+            Write-StackLog "Port $Port already has a listener; validating it against the selected $($target.mode) target."
+        }
+        Wait-Until -Condition { Test-ExpectedRuntime -Target $target -HealthPort $Port } -TimeoutSeconds 45 -Name "$($target.mode) FRAMEFLOW runtime on $Port"
+        [void](Assert-ExpectedRuntime -Target $target -HealthPort $Port)
+        Write-StackLog "FRAMEFLOW $($target.mode) runtime-only startup completed."
+        exit 0
+    }
+
+    if (-not (Test-Listener -ListenerPort 4096)) {
         Write-StackLog "Starting $openCodeTask."
         Start-ScheduledTask -TaskName $openCodeTask
     } else {
@@ -89,23 +201,22 @@ try {
     }
     Wait-Until -Condition { Test-OpenCodeHealthy } -TimeoutSeconds 45 -Name 'OpenCode on 4096'
 
-    if (Test-Listener -Port 8787) {
-        if (-not (Test-FormalFrameflow)) {
-            throw 'Port 8787 is occupied by a process that is not the formal FRAMEFLOW V3 runtime.'
-        }
-        Write-StackLog 'Formal FRAMEFLOW runtime already listens on 127.0.0.1:8787; reusing it.'
+    if (Test-Listener -ListenerPort $Port) {
+        [void](Assert-ExpectedRuntime -Target $target -HealthPort $Port)
+        Write-StackLog "Formal FRAMEFLOW $($target.mode) runtime already listens on 127.0.0.1:$Port; reusing it."
     } else {
         Assert-CutoverMaintenanceInactive
-        Write-StackLog "Starting $frameflowTask."
+        Write-StackLog "Starting $frameflowTask through its mode-aware runtime action."
         Start-ScheduledTask -TaskName $frameflowTask
     }
-    Wait-Until -Condition { Test-FormalFrameflow } -TimeoutSeconds 45 -Name 'FRAMEFLOW V3 on 8787'
+    Wait-Until -Condition { Test-ExpectedRuntime -Target $target -HealthPort $Port } -TimeoutSeconds 45 -Name "$($target.mode) FRAMEFLOW runtime on $Port"
+    [void](Assert-ExpectedRuntime -Target $target -HealthPort $Port)
 
     if ($OpenBrowser) {
-        Start-Process 'http://127.0.0.1:8787/'
+        Start-Process ("http://127.0.0.1:{0}/" -f $Port)
         Write-StackLog 'Opened FRAMEFLOW workbench in the default browser.'
     }
-    Write-StackLog 'FRAMEFLOW runtime stack startup completed.'
+    Write-StackLog 'FRAMEFLOW mode-aware runtime stack startup completed.'
 } catch {
     Write-StackLog ("Startup failed: {0}" -f $_.Exception.Message)
     exit 1

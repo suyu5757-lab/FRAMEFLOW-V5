@@ -6,6 +6,73 @@ Branch: `dev/v5.3.2`
 
 HEAD before attempt: `e213121feb9ed76bc23433fd85e064445b1938d9`
 
+## Historical lifecycle failure — 2026-08-28
+
+The later authorized run `T03FINAL-20260828T052147Z-bed3dc7b` is preserved
+under `data/.cutover/T03FINAL-20260828T052147Z-bed3dc7b/`. It reached:
+
+```text
+Atomic replacement = PASS
+V5 canonical validation = PASS
+P4 8787 = FREE
+```
+
+It then failed at the post-swap lifecycle restore/start boundary:
+
+```text
+POST_SWAP_V5_LIFECYCLE_RESTORE_NO_LISTENER
+```
+
+The failure was not migration nondeterminism, port ownership conflict, or the
+full-regression database assumption; those remain closed historical findings.
+The concrete lifecycle defect was that maintenance `Restore` conflated future
+Scheduled Task policy restoration with starting and verifying the current
+runtime. The startup task uses an `AtLogOn` trigger and the service task has no
+trigger, so enabling either task is not an immediate or mode-verified process
+start. The service Action was also a direct V3-shaped Uvicorn invocation, and
+the stack launcher did not validate `runtime-startup.json` or
+`health.runtime_mode`.
+
+The repair is documented in
+`docs/T03_PRODUCTION_LIFECYCLE_MODE_AWARE_CLOSURE.md` and introduces the
+explicit sequence:
+
+```text
+StartTarget
+  -> resolve and explicitly start the selected runtime
+  -> verify owner, doctor database, health, and runtime_mode
+RestoreAutostartPolicy
+  -> restore only future task Enabled policy
+```
+
+Rollback uses `StartTarget` after restoring Legacy DB/config and then
+`RestoreLegacy`. This historical run was rolled back successfully, leaving the
+production source of truth as Legacy V3. No retry or new production swap was
+performed by the lifecycle repair.
+
+### Real Scheduled Task activation certification attempt
+
+The user subsequently authorized the exact `FRAMEFLOW-V3-Service` Action-only
+mutation and real Legacy lifecycle certification. The initial Codex-host
+attempt used `Set-ScheduledTask -Action`, but the host process had no
+administrator token (`IsAdministrator=False`) and Windows returned `Access
+Denied`. The operator then ran the same updater successfully from an
+Administrator PowerShell. A fresh independent export proved Action-only
+installation with unchanged trigger, principal, run level, and settings.
+
+The failed first attempt's before/after XML SHA-256 values were identical:
+
+```text
+before = 1B70D542B930731BE830C1C1595FF642C1A0E48A252B485187B85F826D3B1766
+after  = 1B70D542B930731BE830C1C1595FF642C1A0E48A252B485187B85F826D3B1766
+```
+
+The installed service task is now mode-aware. No `Enter`, `StartTarget`, or
+`RestoreLegacy` production lifecycle was started because the Codex controller
+itself remains non-elevated; production remains Legacy V3 and no V5 cutover was
+attempted. Full details and evidence paths are in
+`docs/T03_PRODUCTION_LIFECYCLE_MODE_AWARE_CLOSURE.md`.
+
 ## Final authorized production swap — rolled back (2026-08-27)
 
 The one authorized production replacement was executed from blocker-repair
@@ -439,3 +506,75 @@ specialized regression passed `37 passed`. See
 `T03_FULL_REGRESSION_DB_ASSUMPTION_MATRIX.md` and
 `T03_FULL_REGRESSION_DB_DECOUPLING.md` for the 31-entry failure inventory and
 independent test-architecture audit.
+
+## ELEVATED_REAL_LEGACY_LIFECYCLE_CERTIFICATION_2026-08-28
+
+The elevated real Legacy lifecycle certification was completed after the
+mode-aware service Action had already been installed. No production V5
+replacement, migration, Candidate B use, or T05 work was performed.
+
+Evidence:
+
+```text
+State = data/.cutover/T03-LUNA-ELEVATED-REAL-20260828T145000Z.json
+Administrator controller = TRUE
+runtime-startup.json = ABSENT
+Production canonical = D:\11067\CodexWorkspaces\frameflow-v3\data\frameflow.db
+Production schema = LEGACY_V3 / 16
+Production tables = 41
+Production integrity = PASS
+Production FK = PASS (0 violations)
+```
+
+Real lifecycle result:
+
+```text
+Enter = PASS
+  real verified entry owner 39756 stopped by exact PID
+  maintenance token created; both maintenance Tasks disabled
+  repeated classifier observations = FREE; no respawn
+StartTarget = PASS
+  formal mode-aware launcher; expected/actual = LEGACY/LEGACY
+  owner 27184; one 8787 listener; health ready; doctor DB canonical
+RestoreLegacy = PASS
+  policy-only; original Enabled policy restored; no start operation
+Installed Task restart = PASS
+  verified owner 27184 stopped exactly; 8787 FREE
+  Start-ScheduledTask executed; LastRunTime 2026-08-28 18:49:28; result 0
+  owner 32516; one listener; runtime_mode legacy; health ready; doctor DB canonical
+```
+
+The installed `FRAMEFLOW-V3-Service` Action was independently rechecked as
+mode-aware: `run-hidden.vbs` invokes `start-frameflow-stack.ps1 -RuntimeOnly`.
+Its trigger count remained zero, RunLevel remained Highest, and the current
+Task XML SHA-256 was
+`074CAA623F9A5C8FC165F73204061E121C78952DBF87BABD7BCABD6007273D3C`.
+The live port classifier returned `FRAMEFLOW_SUPERVISED` with exactly one
+listener.
+
+This turn's isolated and regression results were:
+
+```text
+V5 first/restart = PASS/PASS
+V5 Workbench = 19/19 then 19/19
+V5 SH004-SH020 = 17/17 then 17/17
+Invalid V5 config fail-closed = PASS
+Foreign owner / unknown owner / PID race / repeated FREE = PASS
+Lifecycle-focused tests = 31 passed, 0 failed/errors/blocked
+Schema/migration/runtime = 123 passed, 0 failed/errors/blocked
+V3 regression = 37 passed, 0 failed
+Post-cutover DB contract = PASS
+```
+
+Independent final decision:
+
+```text
+STATUS = PASS
+PRODUCTION CUTOVER = NOT_PERFORMED
+RUNTIME SOURCE OF TRUTH = LEGACY_V3
+Production DB replaced = NO
+Production DB intentionally migrated = NO
+Dual write = NO
+Dual source = NO
+READY FOR FINAL PRODUCTION CUTOVER = YES
+```

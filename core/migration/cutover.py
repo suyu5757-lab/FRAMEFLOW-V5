@@ -384,10 +384,13 @@ def perform_production_cutover(
 ) -> dict[str, Any]:
     """Atomically place a verified candidate, only with explicit authorization.
 
-    T03-R currently leaves this function unused because application backend
-    integration and restart/rollback rehearsals are not yet proven.  The
-    guards remain here so a later operator cannot accidentally run a default
-    cutover.
+    This function owns only the verified database/config replacement.  It does
+    not infer that a scheduled task is a running backend.  The caller must
+    explicitly run the production lifecycle after this function returns:
+    ``StartTarget`` for the active config, verify health/runtime identity, then
+    ``RestoreAutostartPolicy``.  Rollback must restore the Legacy database and
+    remove the V5 config before explicitly running ``StartTarget`` and
+    ``RestoreLegacy``.
     """
 
     if not production_cutover:

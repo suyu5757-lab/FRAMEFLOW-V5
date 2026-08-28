@@ -570,6 +570,7 @@ async def health(request:Request):
         "ok": status != "not_ready",
         "ready": status == "ready",
         "degraded": status == "degraded",
+        "runtime_mode": "legacy",
         "version": app.version,
         "schema_version": SCHEMA_VERSION,
         "openai_configured": bool(openai and openai["credential_configured"]),

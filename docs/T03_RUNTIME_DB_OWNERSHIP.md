@@ -5,6 +5,73 @@ Branch: `dev/v5.3.2`
 HEAD at audit: `e213121feb9ed76bc23433fd85e064445b1938d9`
 Canonical production path: `D:\11067\CodexWorkspaces\frameflow-v3\data\frameflow.db`
 
+## 2026-08-27 final authorized swap rollback ownership result
+
+Run `T03FINAL-20260827T135157Z-a483f658` completed all Candidate A/B gates and
+performed its single authorized atomic replacement. The new V5 launcher could
+not bind 8787 because long-lived Python PID 39204 already owned that port.
+`Get-NetTCPConnection -ErrorAction SilentlyContinue` had incorrectly hidden the
+listener during preflight; `netstat -ano` exposed it after the bind failure.
+
+The failed V5 database was preserved, the same run's 5/5 read-only Legacy
+archive was restored atomically, and `data/runtime-startup.json` was removed.
+No second replacement was attempted. Current ownership is:
+
+```text
+Writable source of truth = data/frameflow.db (LEGACY_V3)
+Live 8787 = healthy version 3.0.0 / schema 16, PID 39204
+Canonical tables = 41
+Canonical integrity = ok
+Canonical foreign-key violations = 0
+Permanent archive = 5/5 READ_ONLY
+Failed V5 DB = preserved, inactive
+V5 canonical ownership = inactive
+Legacy writable runtime disabled = NO
+Invalid V5 direct writable access = 0 observed
+Dual write = NO
+Dual source of truth = NO
+Production cutover = ROLLED_BACK
+Rollback verification = PASS
+```
+
+This ownership result supersedes no historical failure record below. It records
+the final state after the one-swap stop rule was honored.
+
+## 2026-08-27 Final Cutover Retry ownership result
+
+The authorized retry aborted at the pre-swap contract gate. The exact formal
+interpreter and dependency gate passed, but the current cutover validator
+requires formal-launcher evidence for the exact final swap candidate. The retry
+instructions instead require the launcher to open only Smoke Candidate A and
+prohibit any backend open of final Candidate B. Candidate A evidence is rejected
+for Candidate B with `formal launcher evidence candidate mismatch`, and the
+persisted evidence config is also required to point to Candidate B.
+
+No service stop, checkpoint, archive, candidate, startup-config generation, or
+replacement was performed after discovering this conflict. The active runtime
+ownership therefore remained unchanged throughout the retry:
+
+```text
+Writable source of truth = data/frameflow.db (LEGACY_V3)
+8787 = healthy Legacy V3, PID 33880
+Canonical schema = LEGACY_V3, 41 tables, schema version 16
+Canonical SHA at audit = 917ecbc9d120b419555a63a6a273a352eede45b6ab04b8b9ea91eb8a41631986
+Integrity = ok
+Foreign-key violations = 0
+data/runtime-startup.json = absent
+V5 canonical ownership = inactive
+Dual write = NO
+Dual source of truth = NO
+Production cutover = NOT_PERFORMED
+Rollback = NOT_REQUIRED
+```
+
+The production environment closure remains valid: the formal `.venv` identity,
+runtime imports, declared dependencies, `pip check`, and manifest consistency
+all passed. The blocker is limited to the incompatible Candidate A/Candidate B
+evidence contract. Environment tests passed 10/10 and the combined relevant
+regression passed 119/119.
+
 ## Verdict
 
 **T03 final production cutover: ROLLED_BACK. Current runtime source of truth: LEGACY_V3.**

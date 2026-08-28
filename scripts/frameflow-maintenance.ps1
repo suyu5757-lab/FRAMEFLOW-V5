@@ -1,11 +1,13 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Enter', 'Restore', 'Inspect')]
+    [ValidateSet('Enter', 'StartTarget', 'RestoreAutostartPolicy', 'RestoreLegacy', 'Inspect')]
     [string]$Mode,
 
     [Parameter(Mandatory = $true)]
-    [string]$StatePath
+    [string]$StatePath,
+
+    [string]$RuntimeConfigPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,6 +18,13 @@ $startupTask = 'FRAMEFLOW Runtime Startup'
 $serviceTask = 'FRAMEFLOW-V3-Service'
 $maintenanceTasks = @($startupTask, $serviceTask)
 $maintenancePath = Join-Path $frameflowRoot 'data\.cutover-maintenance.json'
+$runtimeLauncher = Join-Path $frameflowRoot 'scripts\start-frameflow-stack.ps1'
+$formalPython = Join-Path $frameflowRoot '.venv\Scripts\python.exe'
+$resolvedRuntimeConfigPath = if ($RuntimeConfigPath -and $RuntimeConfigPath.Trim()) {
+    [IO.Path]::GetFullPath($RuntimeConfigPath)
+} else {
+    Join-Path $frameflowRoot 'data\runtime-startup.json'
+}
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 function Write-State {
@@ -110,7 +119,8 @@ function Assert-ExpectedFrameflowOwner {
     param(
         [int]$OwnerPid,
         [hashtable]$Process,
-        $Doctor
+        $Doctor,
+        [string]$ExpectedDatabase = $canonicalDatabase
     )
     if ($Process.Name -ne 'python.exe') {
         throw "Port 8787 owner is not Python: PID=$OwnerPid Name=$($Process.Name)."
@@ -120,7 +130,7 @@ function Assert-ExpectedFrameflowOwner {
     }
     $expectedFrontend = [IO.Path]::GetFullPath((Join-Path $frameflowRoot 'web\dist'))
     $actualFrontend = [IO.Path]::GetFullPath([string]$Doctor.frontend_dist)
-    $expectedDatabase = [IO.Path]::GetFullPath($canonicalDatabase)
+    $expectedDatabase = [IO.Path]::GetFullPath($ExpectedDatabase)
     $actualDatabase = [IO.Path]::GetFullPath([string]$Doctor.database)
     if ($actualFrontend -ne $expectedFrontend -or $actualDatabase -ne $expectedDatabase) {
         throw "Port 8787 owner is not the formal FRAMEFLOW runtime: PID=$OwnerPid."
@@ -157,6 +167,132 @@ function Set-TaskEnabledState {
     } else {
         Disable-ScheduledTask -TaskName $TaskName | Out-Null
     }
+}
+
+function Get-HealthEvidence {
+    try {
+        return Invoke-RestMethod -UseBasicParsing -Uri 'http://127.0.0.1:8787/api/health' -TimeoutSec 3
+    } catch {
+        return $null
+    }
+}
+
+function Get-TargetValidationEvidence {
+    if (-not (Test-Path -LiteralPath $formalPython)) {
+        throw "Formal interpreter is missing: $formalPython"
+    }
+    $arguments = @('-m', 'core.runtime.production_launcher', '--validate-only')
+    if (Test-Path -LiteralPath $resolvedRuntimeConfigPath) {
+        $arguments += @('--config', $resolvedRuntimeConfigPath)
+    }
+    $rendered = (& $formalPython @arguments 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Runtime target validation failed: $rendered"
+    }
+    try {
+        return $rendered | ConvertFrom-Json
+    } catch {
+        throw "Runtime target validation returned invalid evidence: $rendered"
+    }
+}
+
+function Assert-TargetRuntime {
+    param([object]$Target)
+    $ownerPid = Get-OwnerPid
+    if (-not $ownerPid) {
+        throw "Expected $($Target.mode) runtime is not listening on 8787."
+    }
+    $process = Get-ProcessEvidence -ProcessId $ownerPid
+    $doctor = Get-DoctorEvidence
+    Assert-ExpectedFrameflowOwner -OwnerPid $ownerPid -Process $process -Doctor $doctor -ExpectedDatabase ([string]$Target.runtime_db)
+    $health = Get-HealthEvidence
+    if (-not $health) {
+        throw "Expected $($Target.mode) runtime did not return health on 8787."
+    }
+    if ([string]$health.runtime_mode -ne [string]$Target.mode) {
+        throw "Runtime mode mismatch during lifecycle: expected=$($Target.mode) actual=$($health.runtime_mode)."
+    }
+    return [ordered]@{
+        OwnerPid = $ownerPid
+        Process = $process
+        Doctor = $doctor
+        Health = $health
+        VerifiedAt = (Get-Date).ToUniversalTime().ToString('o')
+    }
+}
+
+function Set-ExplicitRuntimeStartPermission {
+    if (-not (Test-Path -LiteralPath $maintenancePath)) {
+        throw "Active maintenance token is missing: $maintenancePath"
+    }
+    $token = Get-Content -Raw -LiteralPath $maintenancePath | ConvertFrom-Json
+    $token | Add-Member -NotePropertyName allow_runtime_start -NotePropertyValue $true -Force
+    [IO.File]::WriteAllText(
+        $maintenancePath,
+        ($token | ConvertTo-Json -Depth 8),
+        $utf8NoBom
+    )
+}
+
+function Invoke-TargetRuntimeStart {
+    param([object]$Target)
+    if (-not (Test-Path -LiteralPath $runtimeLauncher)) {
+        throw "Mode-aware runtime launcher is missing: $runtimeLauncher"
+    }
+    Set-ExplicitRuntimeStartPermission
+    $arguments = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runtimeLauncher,
+        '-RuntimeOnly', '-AllowDuringMaintenance'
+    )
+    if ($RuntimeConfigPath -and $RuntimeConfigPath.Trim()) {
+        $arguments += @('-RuntimeConfigPath', $resolvedRuntimeConfigPath)
+    }
+    $rendered = (& powershell.exe @arguments 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Explicit $($Target.mode) runtime start failed: $rendered"
+    }
+    return Assert-TargetRuntime -Target $Target
+}
+
+function Restore-AutostartPolicy {
+    param(
+        [object]$StateValue,
+        [string]$ExpectedMode = ''
+    )
+    if (-not $StateValue.MaintenancePaused) {
+        throw 'Maintenance state does not prove paused startup sources.'
+    }
+    if (-not $StateValue.TargetRuntimeStarted) {
+        throw 'Autostart policy cannot be restored before the target runtime is explicitly started and verified.'
+    }
+    if ($ExpectedMode -and [string]$StateValue.TargetRuntimeMode -ne $ExpectedMode) {
+        throw "Lifecycle target mode mismatch: expected=$ExpectedMode actual=$($StateValue.TargetRuntimeMode)"
+    }
+    $target = Get-TargetValidationEvidence
+    if ([string]$target.mode -ne [string]$StateValue.TargetRuntimeMode) {
+        throw "Current startup target changed during maintenance: expected=$($StateValue.TargetRuntimeMode) actual=$($target.mode)"
+    }
+    $runtimeEvidence = Assert-TargetRuntime -Target $target
+    $serviceOriginal = $StateValue.OriginalTasks.PSObject.Properties[$serviceTask].Value
+    $startupOriginal = $StateValue.OriginalTasks.PSObject.Properties[$startupTask].Value
+    $serviceOriginallyEnabled = [bool]$serviceOriginal.Enabled
+    $startupOriginallyEnabled = [bool]$startupOriginal.Enabled
+
+    # This is policy restoration only.  The explicit runtime is already proven
+    # above; enabling a zero-trigger/on-logon task cannot stand in for a process
+    # start and must never be treated as one.
+    $restoredTokenEvidence = Preserve-MaintenanceToken -Suffix 'restored'
+    $StateValue | Add-Member -NotePropertyName RestoredTokenEvidence -NotePropertyValue $restoredTokenEvidence -Force
+    Set-TaskEnabledState -TaskName $serviceTask -Enabled $serviceOriginallyEnabled
+    Set-TaskEnabledState -TaskName $startupTask -Enabled $startupOriginallyEnabled
+    $StateValue | Add-Member -NotePropertyName AutostartPolicyRestored -NotePropertyValue $true -Force
+    $StateValue | Add-Member -NotePropertyName Restored -NotePropertyValue $true -Force
+    $StateValue | Add-Member -NotePropertyName RestoredAt -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
+    $StateValue | Add-Member -NotePropertyName RestoredOwnerPid -NotePropertyValue $runtimeEvidence.OwnerPid -Force
+    $StateValue | Add-Member -NotePropertyName RestoredRuntimeEvidence -NotePropertyValue $runtimeEvidence -Force
+    $StateValue | Add-Member -NotePropertyName RestoredTasks -NotePropertyValue (Get-TaskStateEvidence) -Force
+    Write-State -Value $StateValue
+    return $StateValue
 }
 
 function Wait-PortFreeEvidence {
@@ -280,46 +416,49 @@ if ($Mode -eq 'Enter') {
 }
 
 $stateValue = Get-Content -Raw -LiteralPath $StatePath | ConvertFrom-Json
-if (-not $stateValue.MaintenancePaused) {
-    throw 'Maintenance state does not prove paused startup sources.'
-}
-$serviceOriginal = $stateValue.OriginalTasks.PSObject.Properties[$serviceTask].Value
-$startupOriginal = $stateValue.OriginalTasks.PSObject.Properties[$startupTask].Value
-$serviceOriginallyEnabled = [bool]$serviceOriginal.Enabled
-$startupOriginallyEnabled = [bool]$startupOriginal.Enabled
-$currentTasks = Get-TaskStateEvidence
-foreach ($taskName in $maintenanceTasks) {
-    if ($currentTasks[$taskName].Enabled) {
-        throw "Scheduled task is not maintenance-disabled: $taskName"
+
+if ($Mode -eq 'StartTarget') {
+    if (-not $stateValue.MaintenancePaused) {
+        throw 'Target runtime cannot start before maintenance sources are paused.'
     }
-}
-$restoredTokenEvidence = Preserve-MaintenanceToken -Suffix 'restored'
-$stateValue | Add-Member -NotePropertyName RestoredTokenEvidence -NotePropertyValue $restoredTokenEvidence -Force
-Set-TaskEnabledState -TaskName $serviceTask -Enabled $serviceOriginallyEnabled
-if ($stateValue.RuntimeWasListening) {
-    if (Get-OwnerPid) {
-        throw 'Refusing lifecycle restore because port 8787 is already occupied.'
-    }
-    Start-ScheduledTask -TaskName $serviceTask
-    $deadline = (Get-Date).AddSeconds(45)
-    do {
-        $restoredOwner = Get-OwnerPid
-        if ($restoredOwner) {
-            $restoredProcess = Get-ProcessEvidence -ProcessId $restoredOwner
-            $restoredDoctor = Get-DoctorEvidence
-            Assert-ExpectedFrameflowOwner -OwnerPid $restoredOwner -Process $restoredProcess -Doctor $restoredDoctor
-            break
+    $currentTasks = Get-TaskStateEvidence
+    foreach ($taskName in $maintenanceTasks) {
+        if ($currentTasks[$taskName].Enabled) {
+            throw "Target runtime cannot start while scheduled task is enabled: $taskName"
         }
-        Start-Sleep -Milliseconds 250
-    } while ((Get-Date) -lt $deadline)
-    if (-not $restoredOwner) {
-        throw 'FRAMEFLOW runtime did not reclaim 8787 during lifecycle restore.'
     }
+    if (Get-OwnerPid) {
+        throw 'Target runtime cannot start while port 8787 is occupied.'
+    }
+    $target = Get-TargetValidationEvidence
+    $runtimeEvidence = Invoke-TargetRuntimeStart -Target $target
+    $stateValue | Add-Member -NotePropertyName TargetRuntimeMode -NotePropertyValue ([string]$target.mode) -Force
+    $stateValue | Add-Member -NotePropertyName TargetRuntimeDatabase -NotePropertyValue ([string]$target.runtime_db) -Force
+    $stateValue | Add-Member -NotePropertyName TargetRuntimeConfig -NotePropertyValue ([string]$target.config_path) -Force
+    $stateValue | Add-Member -NotePropertyName TargetRuntimeStarted -NotePropertyValue $true -Force
+    $stateValue | Add-Member -NotePropertyName TargetRuntimeStartedAt -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
+    $stateValue | Add-Member -NotePropertyName TargetRuntimeEvidence -NotePropertyValue $runtimeEvidence -Force
+    $stateValue.Timeline += [ordered]@{
+        Stage = 'T3'
+        Event = 'target_runtime_explicitly_started_and_verified'
+        Mode = [string]$target.mode
+        OwnerPid = $runtimeEvidence.OwnerPid
+    }
+    Write-State -Value $stateValue
+    $stateValue | ConvertTo-Json -Depth 16
+    exit 0
 }
-Set-TaskEnabledState -TaskName $startupTask -Enabled $startupOriginallyEnabled
-$stateValue.Restored = $true
-$stateValue | Add-Member -NotePropertyName RestoredAt -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
-$stateValue | Add-Member -NotePropertyName RestoredOwnerPid -NotePropertyValue (Get-OwnerPid) -Force
-$stateValue | Add-Member -NotePropertyName RestoredTasks -NotePropertyValue (Get-TaskStateEvidence) -Force
-Write-State -Value $stateValue
-$stateValue | ConvertTo-Json -Depth 12
+
+if ($Mode -eq 'RestoreAutostartPolicy') {
+    $restored = Restore-AutostartPolicy -StateValue $stateValue
+    $restored | ConvertTo-Json -Depth 16
+    exit 0
+}
+
+if ($Mode -eq 'RestoreLegacy') {
+    $restored = Restore-AutostartPolicy -StateValue $stateValue -ExpectedMode 'legacy'
+    $restored | ConvertTo-Json -Depth 16
+    exit 0
+}
+
+throw "Unsupported maintenance mode: $Mode"
