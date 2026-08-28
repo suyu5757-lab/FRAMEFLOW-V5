@@ -15,12 +15,10 @@ from core.migration.cutover import fresh_candidate_from_production
 from core.migration.legacy_compat import LegacyReadOnlyCompatibility
 from core.runtime.persistence import RuntimeModeError, create_runtime_persistence
 from core.runtime.state_store.factory import inspect_database, open_runtime_store
+from tests.conftest import isolated_legacy_v3_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PRODUCTION_DATABASE = PROJECT_ROOT / "data" / "frameflow.db"
-
-
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -28,12 +26,11 @@ def sha256(path: Path) -> str:
 class V5ServerPersistenceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        if not PRODUCTION_DATABASE.is_file():
-            raise unittest.SkipTest("production database is not present")
-        cls.production_sha = sha256(PRODUCTION_DATABASE)
+        cls.legacy_source = isolated_legacy_v3_path("server-v5-source")
+        cls.production_sha = sha256(cls.legacy_source)
         cls.root = Path(tempfile.gettempdir()) / f"frameflow-t03r2-server-{uuid4().hex}"
         result = fresh_candidate_from_production(
-            source=PRODUCTION_DATABASE,
+            source=cls.legacy_source,
             work_dir=cls.root,
             run_id=f"t03r2-{uuid4().hex[:8]}",
         )
@@ -136,7 +133,7 @@ print(json.dumps(payload, ensure_ascii=False))
         self.assertEqual(200, payload["updated"]["status"])
         self.assertEqual(2, payload["updated"]["body"]["revision"])
         self.assertEqual({"status": 200, "name": "T03R2_FIXTURE_UPDATED"}, payload["restart"])
-        self.assertEqual(self.production_sha, sha256(PRODUCTION_DATABASE))
+        self.assertEqual(self.production_sha, sha256(self.legacy_source))
 
     def test_legacy_select_and_all_sql_writes_are_blocked(self) -> None:
         adapter = LegacyReadOnlyCompatibility(self.legacy)
@@ -191,7 +188,7 @@ with TestClient(server.app) as client:
         with self.assertRaises(RuntimeModeError):
             create_runtime_persistence(environment={"FRAMEFLOW_RUNTIME_MODE": "v5"})
         with self.assertRaises(RuntimeModeError):
-            create_runtime_persistence(environment={"FRAMEFLOW_RUNTIME_MODE": "v5", "FRAMEFLOW_V5_DB": str(PRODUCTION_DATABASE)})
+            create_runtime_persistence(environment={"FRAMEFLOW_RUNTIME_MODE": "v5", "FRAMEFLOW_V5_DB": str(self.legacy_source)})
 
 
 if __name__ == "__main__":

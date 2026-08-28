@@ -13,12 +13,10 @@ from core.migration.cutover import fresh_candidate_from_production, perform_prod
 from core.migration.production_environment import FORMAL_PYTHON
 from core.runtime.persistence import RuntimeStartupConfig, write_runtime_startup_config
 from core.runtime.state_store.factory import inspect_database
+from tests.conftest import isolated_legacy_v3_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PRODUCTION_DATABASE = PROJECT_ROOT / "data" / "frameflow.db"
-
-
 def _port_evidence() -> dict[str, object]:
     free = {"classification": "FREE", "owner_pid": None}
     return {
@@ -78,8 +76,9 @@ def _formal_evidence(candidate: Path, archive: Path) -> dict[str, object]:
 def _cutover_fixture() -> tuple[Path, Path, Path, Path]:
     root = Path(os.environ["FRAMEFLOW_TEST_TMP"]) / f"runtime-cutover-{uuid4().hex}"
     root.mkdir(parents=True, exist_ok=False)
+    legacy_source = isolated_legacy_v3_path("runtime-cutover-source")
     migrated = fresh_candidate_from_production(
-        source=PRODUCTION_DATABASE,
+        source=legacy_source,
         work_dir=root / "migration",
         run_id="runtime-config-cutover-test",
     )

@@ -9,6 +9,8 @@ make the setting visible to subprocesses as well.
 from __future__ import annotations
 
 import os
+import json
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -26,3 +28,158 @@ os.environ["FRAMEFLOW_TEST_TMP"] = str(TEST_TMP)
 os.environ["TEMP"] = str(TEST_TMP)
 os.environ["TMP"] = str(TEST_TMP)
 tempfile.tempdir = str(TEST_TMP)
+
+
+def pytest_configure(config: object) -> None:
+    """Inject an isolated canonical path for post-cutover suite simulation.
+
+    This hook is test-only and opt-in.  It never changes production path
+    resolution outside pytest; the environment value must name an existing
+    SQLite fixture created by the invoking test harness.
+    """
+
+    del config
+    override = os.environ.get("FRAMEFLOW_TEST_CANONICAL_DB")
+    if not override:
+        return
+    canonical = Path(override).expanduser().resolve(strict=False)
+    if not canonical.is_file():
+        raise RuntimeError(f"FRAMEFLOW_TEST_CANONICAL_DB does not exist: {canonical}")
+
+    from core.migration import backup, online, v3_to_v5
+    from core.runtime.persistence import factory as persistence_factory
+    from core.runtime.state_store import factory as state_store_factory
+    from core.runtime.state_store import store as state_store
+
+    state_store_factory.CANONICAL_DATABASE_PATH = canonical
+    state_store.DEFAULT_DATABASE_PATH = canonical
+    persistence_factory.CANONICAL_DATABASE_PATH = canonical
+    backup.PRODUCTION_DATABASE = canonical
+    online.PRODUCTION_DATABASE = canonical
+    v3_to_v5.PRODUCTION_DATABASE = canonical
+
+
+def create_legacy_v3_fixture(path: Path) -> Path:
+    """Create an isolated read-only-compatible Legacy V3 SQLite source.
+
+    Runtime tests must never use the live canonical database as a legacy
+    fixture.  This intentionally small but real Legacy database supplies the
+    schema-16 project document and SH004--SH020 records required by the
+    migration and compatibility contracts.
+    """
+
+    path = path.expanduser().resolve(strict=False)
+    if path.exists():
+        raise FileExistsError(f"refusing to overwrite test legacy fixture: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shots = [
+        {
+            "id": f"SH{number:03d}",
+            "sequenceId": "SQ001",
+            "status": "DRAFT",
+            "duration": 0,
+            # Deliberately incomplete v1 records: they remain on the explicit
+            # read-only compatibility path rather than silently becoming V5.
+            "purpose": "historical compatibility fixture",
+        }
+        for number in range(4, 21)
+    ]
+    document = {
+        "id": "TEST_LEGACY_PROJECT",
+        "name": "Isolated Legacy Fixture",
+        "ratio": "16:9",
+        "fps": 24,
+        "duration": 1,
+        "shots": shots,
+        "assets": [],
+    }
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            """
+            PRAGMA foreign_keys=ON;
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                document_json TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                lifecycle_status TEXT NOT NULL
+            );
+            """
+        )
+        # The offline migrator intentionally reads these legacy tables even
+        # when they have no rows.  Keep their shape minimal: no test is
+        # permitted to source them from the real canonical database.
+        for table_name in (
+            "agent_candidate_versions_v5",
+            "agent_plan_events_v5",
+            "agent_plans_v5",
+            "approval_gates_v3",
+            "approvals",
+            "artifact_lineage_v3",
+            "artifacts",
+            "asset_boards_v7",
+            "asset_comparisons_v4",
+            "asset_dependencies_v4",
+            "asset_events",
+            "asset_qa_runs",
+            "asset_reference_roles_v4",
+            "asset_versions",
+            "audit_events_v16",
+            "backup_records_v11",
+            "capability_bindings",
+            "conversations",
+            "generation_snapshots_v9",
+            "media_proxies_v6",
+            "messages",
+            "node_runs_v3",
+            "prompt_versions",
+            "provider_profiles",
+            "recovery_plans_v11",
+            "render_jobs_v6",
+            "story_versions",
+            "story_workflow_chains",
+            "task_events",
+            "tasks",
+            "timeline_events_v6",
+            "timelines_v3",
+            "workflow_graph_events",
+            "workflow_graphs",
+            "workflow_run_events_v3",
+            "workflow_runs",
+            "workflow_runs_v3",
+            "workflow_templates_v3",
+        ):
+            connection.execute(f'CREATE TABLE "{table_name}" (id TEXT PRIMARY KEY)')
+        now = "2026-08-28T00:00:00+00:00"
+        connection.execute("INSERT INTO schema_migrations VALUES(16, ?)", (now,))
+        connection.execute(
+            "INSERT INTO projects VALUES(?,?,?,?,?,?,?)",
+            (
+                "TEST_LEGACY_PROJECT",
+                "Isolated Legacy Fixture",
+                json.dumps(document, ensure_ascii=False),
+                1,
+                now,
+                now,
+                "active",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return path
+
+
+def isolated_legacy_v3_path(label: str) -> Path:
+    """Return a fresh Legacy fixture below the configured test-only root."""
+
+    from uuid import uuid4
+
+    return create_legacy_v3_fixture(TEST_TMP / f"{label}-{uuid4().hex}" / "legacy_v3.db")

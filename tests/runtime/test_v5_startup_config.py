@@ -19,18 +19,17 @@ from core.runtime.persistence import (
     resolve_runtime_environment,
     write_runtime_startup_config,
 )
+from tests.conftest import isolated_legacy_v3_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PRODUCTION_DATABASE = PROJECT_ROOT / "data" / "frameflow.db"
-
-
 @pytest.fixture(scope="module")
 def isolated_runtime() -> dict[str, Path]:
     root = Path(os.environ["FRAMEFLOW_TEST_TMP"]) / f"v5-startup-config-{uuid4().hex}"
     root.mkdir(parents=True, exist_ok=False)
+    legacy_source = isolated_legacy_v3_path("v5-startup-source")
     migrated = fresh_candidate_from_production(
-        source=PRODUCTION_DATABASE,
+        source=legacy_source,
         work_dir=root / "migration",
         run_id="startup-config-test",
     )

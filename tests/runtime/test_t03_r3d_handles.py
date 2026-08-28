@@ -11,12 +11,10 @@ from core.migration.cutover import handle_free_rename_probe
 from core.runtime.persistence import create_runtime_persistence, shutdown_runtime_persistence
 from core.runtime.state_store import StateStore
 from core.runtime.state_store.factory import open_runtime_store
+from tests.conftest import isolated_legacy_v3_path
 
 
 TEST_ROOT = Path(os.environ["FRAMEFLOW_TEST_TMP"]) / "r3d-handles"
-PRODUCTION_DATABASE = Path(__file__).resolve().parents[2] / "data" / "frameflow.db"
-
-
 def _candidate(label: str) -> Path:
     root = TEST_ROOT / f"{label}-{uuid4().hex}"
     root.mkdir(parents=True, exist_ok=False)
@@ -76,7 +74,7 @@ def test_persistence_factory_shutdown_is_idempotent_and_releases_pool() -> None:
             "FRAMEFLOW_RUNTIME_MODE": "v5",
             "FRAMEFLOW_V5_DB": str(candidate),
             "FRAMEFLOW_V5_PRODUCTION": "0",
-            "FRAMEFLOW_LEGACY_READONLY_DB": str(PRODUCTION_DATABASE),
+            "FRAMEFLOW_LEGACY_READONLY_DB": str(isolated_legacy_v3_path("r3d-factory-legacy")),
         }
     )
 

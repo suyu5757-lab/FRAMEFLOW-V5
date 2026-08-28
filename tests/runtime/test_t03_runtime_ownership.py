@@ -23,12 +23,10 @@ from core.runtime.state_store.factory import (
     inspect_database,
     open_runtime_store,
 )
+from tests.conftest import isolated_legacy_v3_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PRODUCTION_DATABASE = PROJECT_ROOT / "data" / "frameflow.db"
-
-
 class T03RuntimeOwnershipTests(unittest.TestCase):
     def test_factory_initializes_only_an_explicit_candidate_and_enforces_pragmas(self) -> None:
         path = Path(tempfile.gettempdir()) / "frameflow-t03-factory-candidate.db"
@@ -58,34 +56,29 @@ class T03RuntimeOwnershipTests(unittest.TestCase):
             open_runtime_store(path, candidate=True)
 
     def test_legacy_compatibility_is_read_only(self) -> None:
-        if not PRODUCTION_DATABASE.is_file():
-            self.skipTest("production legacy database is not present")
-        adapter = LegacyReadOnlyCompatibility(PRODUCTION_DATABASE)
+        adapter = LegacyReadOnlyCompatibility(isolated_legacy_v3_path("ownership-readonly"))
         self.assertIsNotNone(adapter.get_shot("SH004"))
         with self.assertRaises(LegacyReadOnlyError):
             adapter.write_shot("SH004", {"status": "DRAFT"})
 
     def test_all_required_legacy_shots_are_accounted_before_cutover(self) -> None:
-        if not PRODUCTION_DATABASE.is_file():
-            self.skipTest("production legacy database is not present")
-        accounting = account_legacy_shots(PRODUCTION_DATABASE, list(REQUIRED_LEGACY_SHOTS))
+        accounting = account_legacy_shots(isolated_legacy_v3_path("ownership-accounting"), list(REQUIRED_LEGACY_SHOTS))
         self.assertEqual(17, accounting["required"])
         self.assertEqual(17, accounting["accounted"])
         self.assertEqual(0, accounting["unaccounted"])
         self.assertEqual(17, accounting["counts"][LEGACY_READ_ONLY_COMPAT])
 
     def test_fresh_candidate_is_verified_without_touching_production(self) -> None:
-        if not PRODUCTION_DATABASE.is_file():
-            self.skipTest("production legacy database is not present")
-        before = PRODUCTION_DATABASE.stat().st_mtime_ns
+        legacy_source = isolated_legacy_v3_path("ownership-candidate-source")
+        before = legacy_source.stat().st_mtime_ns
         root = Path(tempfile.gettempdir()) / f"frameflow-t03-fresh-candidate-{uuid4().hex}"
-        result = fresh_candidate_from_production(source=PRODUCTION_DATABASE, work_dir=root)
+        result = fresh_candidate_from_production(source=legacy_source, work_dir=root)
         self.assertTrue(Path(result["backup_path"]).is_file())
         self.assertTrue(Path(result["candidate_path"]).is_file())
         self.assertTrue(Path(result["manifest_path"]).is_file())
         self.assertEqual(0, result["legacy_shots"]["unaccounted"])
         self.assertTrue(result["manifest"]["t03_cutover_gate"]["ready"])
-        self.assertEqual(before, PRODUCTION_DATABASE.stat().st_mtime_ns)
+        self.assertEqual(before, legacy_source.stat().st_mtime_ns)
 
     def test_state_store_commit_rollback_close_reopen_smoke(self) -> None:
         path = Path(tempfile.gettempdir()) / f"frameflow-t03-state-smoke-{uuid4().hex}.db"

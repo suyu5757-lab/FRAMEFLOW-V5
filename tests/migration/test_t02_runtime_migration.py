@@ -27,6 +27,7 @@ from core.migration.equivalence import logical_data_fingerprint
 from core.migration.validation import validate_candidate
 from core.runtime.state_store import StateStore
 from core.schemas.runtime_mvp import RUNTIME_TABLE_NAMES
+from tests.conftest import isolated_legacy_v3_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -276,14 +277,13 @@ class T02RuntimeMigrationTests(unittest.TestCase):
             restore_backup(backup, PRODUCTION_DATABASE)
 
     def test_production_backup_is_read_only_and_hash_unchanged(self) -> None:
-        if not PRODUCTION_DATABASE.is_file():
-            self.skipTest("production database not present")
-        before = sha256(PRODUCTION_DATABASE)
+        legacy_source = isolated_legacy_v3_path("migration-backup-source")
+        before = sha256(legacy_source)
         backup = unique_path("production-backup")
-        metadata = create_backup(PRODUCTION_DATABASE, backup)
-        after = sha256(PRODUCTION_DATABASE)
+        metadata = create_backup(legacy_source, backup)
+        after = sha256(legacy_source)
         self.assertEqual(before, after)
-        self.assertEqual(41, metadata["table_count"])
+        self.assertEqual(verify_backup(legacy_source)["table_count"], metadata["table_count"])
         self.assertEqual("ok", metadata["integrity_check"])
 
     def test_failure_injection_invalid_shot_leaves_source_untouched(self) -> None:

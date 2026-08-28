@@ -422,3 +422,20 @@ READY FOR T00-T03 FINAL RE-AUDIT = NO
 
 Per the task Stop Rule, no launcher repair, dependency installation, or T05
 work was performed in this attempt.
+
+## POST_CUTOVER_FULL_REGRESSION_LEGACY_CANONICAL_ASSUMPTION
+
+The later T03 test-architecture closure retained the recorded failed-V5 and
+rollback evidence from `T03FINAL-20260828T043608Z-bbfd9415` and made no new
+production cutover attempt. It established that the post-swap regression
+failure was a test-only canonical-as-Legacy assumption, not a V5 runtime,
+port-ownership, migration-determinism, environment, or R3E defect.
+
+Tests now construct an explicit Legacy fixture, a distinct V5 fixture, and a
+distinct Legacy readonly source below `FRAMEFLOW_TEST_TMP`. The exact full
+regression passed both in the current Legacy rollback state and with an
+isolated V5 canonical simulation: `117 passed` in each state. The V3
+specialized regression passed `37 passed`. See
+`T03_FULL_REGRESSION_DB_ASSUMPTION_MATRIX.md` and
+`T03_FULL_REGRESSION_DB_DECOUPLING.md` for the 31-entry failure inventory and
+independent test-architecture audit.

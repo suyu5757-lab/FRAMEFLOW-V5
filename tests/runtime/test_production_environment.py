@@ -22,12 +22,10 @@ from core.migration.production_environment import (
     declared_jsonschema_version,
     verify_production_interpreter,
 )
+from tests.conftest import isolated_legacy_v3_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PRODUCTION_DATABASE = PROJECT_ROOT / "data" / "frameflow.db"
-
-
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -42,9 +40,10 @@ def _free_port() -> int:
 def formal_probe() -> dict[str, object]:
     root = Path(os.environ["FRAMEFLOW_TEST_TMP"]) / f"formal-launcher-{uuid4().hex}"
     root.mkdir(parents=True, exist_ok=False)
-    production_before = _sha256(PRODUCTION_DATABASE)
+    legacy_source = isolated_legacy_v3_path("formal-launcher-source")
+    production_before = _sha256(legacy_source)
     legacy = root / "legacy-readonly.db"
-    create_backup(PRODUCTION_DATABASE, legacy)
+    create_backup(legacy_source, legacy)
     legacy.chmod(stat.S_IREAD)
     migrated = fresh_candidate_from_production(
         source=legacy,
@@ -82,7 +81,8 @@ def formal_probe() -> dict[str, object]:
     payload = json.loads(output.read_text(encoding="utf-8"))
     payload["test_root"] = str(root)
     payload["production_before"] = production_before
-    payload["production_after"] = _sha256(PRODUCTION_DATABASE)
+    payload["production_after"] = _sha256(legacy_source)
+    payload["legacy_source"] = str(legacy_source)
     return payload
 
 
@@ -174,7 +174,8 @@ def test_e9_missing_dependency_fails_import_gate_before_launcher() -> None:
 def test_e10_pre_swap_failure_leaves_production_untouched(
     formal_probe: dict[str, object],
 ) -> None:
-    before = _sha256(PRODUCTION_DATABASE)
+    legacy_source = Path(str(formal_probe["legacy_source"]))
+    before = _sha256(legacy_source)
     candidate = Path(str(formal_probe["candidate"]))
     legacy = Path(str(formal_probe["legacy"]))
     with patch("core.migration.cutover.os.replace") as replace:
@@ -189,5 +190,5 @@ def test_e10_pre_swap_failure_leaves_production_untouched(
                 formal_launcher_evidence=None,
             )
     replace.assert_not_called()
-    assert _sha256(PRODUCTION_DATABASE) == before
+    assert _sha256(legacy_source) == before
     assert formal_probe["production_before"] == formal_probe["production_after"]
