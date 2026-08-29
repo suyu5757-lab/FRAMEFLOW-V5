@@ -14,6 +14,10 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+import pytest
+
+from tests.support.runtime_isolation import forbid_real_production_network
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEST_TMP = PROJECT_ROOT / ".tmp" / "tests"
@@ -28,6 +32,23 @@ os.environ["FRAMEFLOW_TEST_TMP"] = str(TEST_TMP)
 os.environ["TEMP"] = str(TEST_TMP)
 os.environ["TMP"] = str(TEST_TMP)
 tempfile.tempdir = str(TEST_TMP)
+
+
+@pytest.fixture(autouse=True)
+def guard_legacy_regression_boundaries(request: pytest.FixtureRequest):
+    """Keep Legacy regression tests off real config, DB, and port 8787."""
+
+    filename = Path(str(request.node.fspath)).name
+    guarded = {
+        "test_v3.py",
+        "test_recovery_v3.py",
+        "test_v3_function_matrix.py",
+    }
+    if filename in guarded:
+        with forbid_real_production_network():
+            yield
+    else:
+        yield
 
 
 def pytest_configure(config: object) -> None:

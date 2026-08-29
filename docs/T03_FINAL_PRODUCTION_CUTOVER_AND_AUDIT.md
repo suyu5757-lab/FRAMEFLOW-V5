@@ -170,6 +170,31 @@ Runtime source of truth = LEGACY_V3
 READY FOR FINAL PRODUCTION CUTOVER = YES
 ```
 
+## Post-cutover V3 runtime/app isolation closure — 2026-08-29
+
+The historical failed run `T03FINAL-20260829T002659Z-005e7ff9` remains
+preserved as rolled-back evidence. Its V3 failure was positively traced to a
+Legacy fixture that patched only `server.DB_PATH` while reusing the global
+`server.app` imported under the ambient V5 `data/runtime-startup.json`.
+`server.py:47-49` had already cached V5 runtime state, and
+`server.py:367-371` correctly returned `501 v5_route_not_implemented` for the
+retired V3 write route.
+
+The repair gives the three Legacy regression modules explicit temporary
+Legacy config, mode, DB, fresh server module/app, lifecycle disposal, module
+cache reset, and a real-Production network guard. V5's 501 contract is
+retained. Ambient-V5-config Legacy regression passed; V5→Legacy→V5 same
+process passed; the isolated post-cutover sequence passed with V5 remaining
+ready and logically unchanged. Current verification: V3 37 passed, focused
+98 passed, schema/migration/runtime 140 passed, Git safety 10 passed, and full
+tests 281 passed.
+
+Detailed evidence is recorded in
+`docs/T03_POST_CUTOVER_V3_RUNTIME_ISOLATION_CLOSURE.md`.
+
+No Production cutover, canonical replacement, Maintenance operation, Task
+mutation, or real Production V5 runtime config was performed in this closure.
+
 ## Candidate B sidecar-free terminal seal closure — 2026-08-29
 
 The failed run `T03FINAL-20260828T155843Z-16fbdb3b` is preserved unchanged.
