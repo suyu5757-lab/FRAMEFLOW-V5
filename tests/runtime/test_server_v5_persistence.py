@@ -61,6 +61,7 @@ with TestClient(server.app) as client:
         'audio': f'/api/v2/projects/{project_id}/audio-studio',
         'settings': '/api/v2/settings',
         'audit': '/api/v2/system/data-audit',
+        'runtime_contract': '/api/v2/system/runtime-contract',
         'workflows': '/api/v2/workflows',
         'legacy_api': '/api/projects',
         'unsupported': '/api/v2/projects/' + project_id + '/graph/write',
@@ -74,6 +75,7 @@ with TestClient(server.app) as client:
         'projects': projects.json(),
         'project': client.get(paths['project']).json(),
         'assets': client.get(paths['assets']).json(),
+        'runtime_contract': client.get(paths['runtime_contract']).json(),
         'responses': responses,
         'legacy': {shot: {'status': response.status_code, 'read_only': response.json().get('read_only')} for shot, response in legacy.items()},
     }
@@ -117,6 +119,10 @@ print(json.dumps(payload, ensure_ascii=False))
         self.assertTrue(all(status == 200 for key, status in payload["responses"].items() if key not in {"legacy_api", "unsupported"}), payload["responses"])
         self.assertEqual(410, payload["responses"]["legacy_api"])
         self.assertEqual(501, payload["responses"]["unsupported"])
+        self.assertEqual(
+            {"database": str(self.candidate), "journal_mode": "wal", "foreign_keys": 1, "busy_timeout": 5000},
+            payload["runtime_contract"],
+        )
         self.assertEqual(422, payload["invalid_create"])
         self.assertEqual(404, payload["missing_project"])
         self.assertEqual({"SH004": {"status": 200, "read_only": True}, "SH010": {"status": 200, "read_only": True}, "SH020": {"status": 200, "read_only": True}}, payload["legacy"])

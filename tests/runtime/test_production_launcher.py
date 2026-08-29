@@ -74,6 +74,32 @@ def test_valid_v5_config_selects_v5_and_injects_only_its_environment() -> None:
     assert environment["FRAMEFLOW_RUNTIME_CONFIG"] == str(config_path.resolve())
 
 
+def test_explicit_isolated_config_ignores_ambient_production_simulation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _test_root("mode-aware-explicit-isolated")
+    candidate, legacy, _ = _paths(root)
+    config_path = root / "runtime-startup.json"
+    write_runtime_startup_config(
+        RuntimeStartupConfig.build(
+            runtime_mode="v5",
+            runtime_db=candidate,
+            legacy_readonly_db=legacy,
+            production=False,
+            generated_by="tests.runtime.test_production_launcher",
+            cutover_run_id="explicit-isolated-wins",
+        ),
+        config_path,
+    )
+    monkeypatch.setenv("FRAMEFLOW_V5_PRODUCTION_SIMULATION", "1")
+
+    target = production_launcher.resolve_runtime_target(config_path)
+
+    assert target.production is False
+    assert target.production_simulation is False
+    assert target.runtime_db == candidate.resolve()
+
+
 def test_invalid_v5_config_fails_closed_before_start() -> None:
     root = _test_root("mode-aware-invalid")
     candidate, legacy, _ = _paths(root)

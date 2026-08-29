@@ -333,6 +333,8 @@ async def _v5_runtime_response(request: Request, path: str) -> JSONResponse | No
             return JSONResponse(persistence.settings_payload())
         if method == "GET" and path == "/api/v2/system/data-audit":
             return JSONResponse(persistence.data_audit())
+        if method == "GET" and path == "/api/v2/system/runtime-contract":
+            return JSONResponse(persistence.runtime_sqlite_contract())
         if method == "GET" and path == "/api/v2/dashboard":
             return JSONResponse(persistence.dashboard_payload(request.query_params.get("project_id")))
         if method == "GET" and path == "/api/v2/projects":

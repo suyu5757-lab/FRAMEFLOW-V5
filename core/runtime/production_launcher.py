@@ -158,13 +158,21 @@ def resolve_runtime_target(
         raise ProductionLauncherError(str(exc)) from exc
 
     runtime_db = Path(config.runtime_db).expanduser().resolve(strict=False)
-    production_simulation = str(os.environ.get("FRAMEFLOW_V5_PRODUCTION_SIMULATION") or "").strip().lower() in {
+    requested_production_simulation = str(
+        os.environ.get("FRAMEFLOW_V5_PRODUCTION_SIMULATION") or ""
+    ).strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
     if config.runtime_mode == "v5":
+        # An explicit isolated target must win over an ambient production-like
+        # simulation.  The simulation flag belongs to the selected production
+        # target; inheriting it into a separately configured non-production
+        # launcher would make the formal isolation contract impossible to use
+        # while a production-like V5 runtime is already active.
+        production_simulation = bool(requested_production_simulation and config.production)
         if config.production and runtime_db != canonical_database.resolve(strict=False) and not production_simulation:
             raise ProductionLauncherError(
                 "production V5 runtime must use the canonical database path"

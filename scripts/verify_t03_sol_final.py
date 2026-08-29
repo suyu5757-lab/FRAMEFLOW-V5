@@ -242,6 +242,35 @@ def runtime_sqlite_gates(candidate: Path) -> dict[str, Any]:
     }
 
 
+def live_runtime_sqlite_contract(port: int, expected_database: Path) -> dict[str, Any]:
+    """Read PRAGMAs from the running V5 RuntimePersistence StateStore pool.
+
+    This intentionally uses the V5 runtime's diagnostic endpoint rather than a
+    new sqlite3 connection: foreign_keys is connection-scoped and must be
+    proven on the pool that actually serves Production requests.
+    """
+
+    status, payload = request_json(port, "GET", "/api/v2/system/runtime-contract")
+    expected = {
+        "database": str(expected_database.resolve(strict=False)),
+        "journal_mode": "wal",
+        "foreign_keys": 1,
+        "busy_timeout": 5000,
+    }
+    actual = {
+        "database": str(payload.get("database") or ""),
+        "journal_mode": str(payload.get("journal_mode") or "").lower(),
+        "foreign_keys": payload.get("foreign_keys"),
+        "busy_timeout": payload.get("busy_timeout"),
+    }
+    if status != 200 or actual != expected:
+        raise AssertionError(
+            "live V5 RuntimePersistence SQLite contract failed: "
+            f"status={status} expected={expected} actual={actual}"
+        )
+    return actual
+
+
 def run_http_gate(port: int, persisted_fixture: str | None = None) -> dict[str, Any]:
     health_status, health = request_json(port, "GET", "/api/health")
     if (
@@ -505,9 +534,17 @@ def main() -> int:
         )
         try:
             health = wait_for_v5(args.port, process)
+            runtime_contract = live_runtime_sqlite_contract(args.port, candidate)
             gate = run_http_gate(args.port, persisted_fixture)
             persisted_fixture = str(gate["fixture_id"])
-            results.append({"boot": boot, "health": health, **gate})
+            results.append(
+                {
+                    "boot": boot,
+                    "health": health,
+                    "live_runtime_sqlite_contract": runtime_contract,
+                    **gate,
+                }
+            )
         finally:
             stop_backend(process)
             shutdown = wait_for_port_free(args.port)

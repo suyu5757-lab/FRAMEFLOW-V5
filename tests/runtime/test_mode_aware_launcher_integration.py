@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import time
@@ -10,7 +11,8 @@ from uuid import uuid4
 from core.migration.cutover import fresh_candidate_from_production
 from core.migration.port_ownership import parse_netstat_listeners
 from core.runtime.persistence import RuntimeStartupConfig, write_runtime_startup_config
-from scripts.verify_t03_sol_final import cleanup_probe_fixtures, run_http_gate
+from core.runtime.state_store.factory import CANONICAL_DATABASE_PATH
+from scripts.verify_t03_sol_final import cleanup_probe_fixtures, request_json, run_http_gate
 from tests.conftest import isolated_legacy_v3_path
 
 
@@ -74,6 +76,26 @@ def _stop_owned_listener(port: int) -> None:
     assert _listener_pid(port) is None
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _runtime_config_bytes() -> bytes | None:
+    path = PROJECT_ROOT / "data" / "runtime-startup.json"
+    return path.read_bytes() if path.is_file() else None
+
+
+def _assert_live_runtime_contract(port: int, candidate: Path) -> None:
+    status, payload = request_json(port, "GET", "/api/v2/system/runtime-contract")
+    assert status == 200
+    assert payload == {
+        "database": str(candidate.resolve()),
+        "journal_mode": "wal",
+        "foreign_keys": 1,
+        "busy_timeout": 5000,
+    }
+
+
 def test_exact_runtime_launcher_honors_v5_config_on_first_start_and_restart() -> None:
     root = Path(os.environ["FRAMEFLOW_TEST_TMP"]) / f"mode-aware-integration-{uuid4().hex}"
     root.mkdir(parents=True, exist_ok=False)
@@ -85,6 +107,25 @@ def test_exact_runtime_launcher_honors_v5_config_on_first_start_and_restart() ->
     )
     candidate = Path(migrated["candidate_path"])
     legacy = Path(migrated["backup_path"])
+    ambient = fresh_candidate_from_production(
+        source=legacy_source,
+        work_dir=root / "ambient-migration",
+        run_id="mode-aware-ambient-production",
+    )
+    ambient_candidate = Path(ambient["candidate_path"])
+    ambient_legacy = Path(ambient["backup_path"])
+    ambient_config_path = root / "ambient-runtime-startup.json"
+    write_runtime_startup_config(
+        RuntimeStartupConfig.build(
+            runtime_mode="v5",
+            runtime_db=ambient_candidate,
+            legacy_readonly_db=ambient_legacy,
+            production=True,
+            generated_by="tests.runtime.test_mode_aware_launcher_integration",
+            cutover_run_id="mode-aware-ambient-production",
+        ),
+        ambient_config_path,
+    )
     config_path = root / "runtime-startup.json"
     write_runtime_startup_config(
         RuntimeStartupConfig.build(
@@ -98,8 +139,45 @@ def test_exact_runtime_launcher_honors_v5_config_on_first_start_and_restart() ->
         config_path,
     )
     port = _free_port()
+    ambient_port = _free_port()
+    while ambient_port == port:
+        ambient_port = _free_port()
+    isolated_maintenance_path = root / "isolated-maintenance-state.json"
     fixture_ids: list[str] = []
+    canonical_before = _sha256(CANONICAL_DATABASE_PATH)
+    runtime_config_before = _runtime_config_bytes()
+    ambient_config_before = ambient_config_path.read_bytes()
+    ambient_environment = os.environ.copy()
+    ambient_environment.update(
+        {
+            "FRAMEFLOW_RUNTIME_CONFIG": str(ambient_config_path),
+            "FRAMEFLOW_V5_PRODUCTION_SIMULATION": "1",
+        }
+    )
     try:
+        ambient_start = subprocess.run(
+            [
+                str(PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"),
+                "-m",
+                "core.runtime.production_launcher",
+                "--start",
+                "--config",
+                str(ambient_config_path),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(ambient_port),
+            ],
+            cwd=PROJECT_ROOT,
+            env=ambient_environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=90,
+        )
+        assert ambient_start.returncode == 0, ambient_start.stdout + ambient_start.stderr
+        assert _listener_pid(ambient_port) is not None
+        ambient_after_start = _sha256(ambient_candidate)
         command = [
             "powershell.exe",
             "-NoProfile",
@@ -110,6 +188,8 @@ def test_exact_runtime_launcher_honors_v5_config_on_first_start_and_restart() ->
             "-RuntimeOnly",
             "-RuntimeConfigPath",
             str(config_path),
+            "-MaintenanceStatePath",
+            str(isolated_maintenance_path),
             "-Port",
             str(port),
         ]
@@ -118,6 +198,7 @@ def test_exact_runtime_launcher_honors_v5_config_on_first_start_and_restart() ->
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
+            env=ambient_environment,
             check=False,
             timeout=90,
         )
@@ -126,6 +207,8 @@ def test_exact_runtime_launcher_honors_v5_config_on_first_start_and_restart() ->
         fixture_ids.append(str(first_gate["fixture_id"]))
         assert first_gate["api_passed"] == 19
         assert first_gate["historical_passed"] == 17
+        assert Path(first_gate["doctor"]["database"]).resolve() == candidate.resolve()
+        _assert_live_runtime_contract(port, candidate)
         _stop_owned_listener(port)
 
         second = subprocess.run(
@@ -133,6 +216,7 @@ def test_exact_runtime_launcher_honors_v5_config_on_first_start_and_restart() ->
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
+            env=ambient_environment,
             check=False,
             timeout=90,
         )
@@ -141,6 +225,8 @@ def test_exact_runtime_launcher_honors_v5_config_on_first_start_and_restart() ->
         fixture_ids.append(str(second_gate["fixture_id"]))
         assert second_gate["api_passed"] == 19
         assert second_gate["historical_passed"] == 17
+        assert Path(second_gate["doctor"]["database"]).resolve() == candidate.resolve()
+        _assert_live_runtime_contract(port, candidate)
         _stop_owned_listener(port)
 
         invalid_payload = json.loads(config_path.read_text(encoding="utf-8"))
@@ -151,12 +237,20 @@ def test_exact_runtime_launcher_honors_v5_config_on_first_start_and_restart() ->
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
+            env=ambient_environment,
             check=False,
             timeout=30,
         )
         assert invalid.returncode != 0
         assert _listener_pid(port) is None
+        assert ambient_config_path.read_bytes() == ambient_config_before
+        assert _sha256(ambient_candidate) == ambient_after_start
+        assert _sha256(CANONICAL_DATABASE_PATH) == canonical_before
+        assert _runtime_config_bytes() == runtime_config_before
     finally:
         _stop_owned_listener(port)
+        _stop_owned_listener(ambient_port)
+        assert _listener_pid(port) is None
+        assert _listener_pid(ambient_port) is None
         if fixture_ids:
             cleanup_probe_fixtures(candidate, fixture_ids)

@@ -4,6 +4,7 @@ param(
     [switch]$RuntimeOnly,
     [switch]$AllowDuringMaintenance,
     [string]$RuntimeConfigPath = '',
+    [string]$MaintenanceStatePath = '',
     [int]$Port = 8787,
     [string]$BindHost = '127.0.0.1'
 )
@@ -16,7 +17,12 @@ $logDirectory = Join-Path $frameflowRoot 'data\logs'
 $logPath = Join-Path $logDirectory 'frameflow-runtime-startup.log'
 $openCodeTask = 'FRAMEFLOW OpenCode Agent Runtime'
 $frameflowTask = 'FRAMEFLOW-V3-Service'
-$maintenancePath = Join-Path $frameflowRoot 'data\.cutover-maintenance.json'
+$defaultMaintenancePath = Join-Path $frameflowRoot 'data\.cutover-maintenance.json'
+$maintenancePath = if ($MaintenanceStatePath -and $MaintenanceStatePath.Trim()) {
+    [IO.Path]::GetFullPath($MaintenanceStatePath)
+} else {
+    $defaultMaintenancePath
+}
 
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 
@@ -187,8 +193,11 @@ function Start-FormalRuntime {
 
 try {
     Write-StackLog 'Starting FRAMEFLOW mode-aware runtime stack.'
-    Assert-CutoverMaintenanceInactive
     $target = Get-TargetValidation
+    if ($MaintenanceStatePath -and $MaintenanceStatePath.Trim() -and [bool]$target.production) {
+        throw 'MaintenanceStatePath override is permitted only for an explicit non-production runtime target.'
+    }
+    Assert-CutoverMaintenanceInactive
 
     if ($RuntimeOnly) {
         if (-not (Test-Listener -ListenerPort $Port)) {

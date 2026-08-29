@@ -96,6 +96,17 @@ class RuntimePersistence:
             "V5 application code must use RuntimePersistence methods; raw SQL connections are not exposed"
         )
 
+    def runtime_sqlite_contract(self) -> dict[str, Any]:
+        """Return SQLite settings from this running facade's StateStore pool."""
+
+        pragmas = self.store.pragmas()
+        return {
+            "database": str(self.path),
+            "journal_mode": str(pragmas["journal_mode"]).lower(),
+            "foreign_keys": int(pragmas["foreign_keys"]),
+            "busy_timeout": int(pragmas["busy_timeout"]),
+        }
+
     def _revision(self, project_id: str) -> int:
         updates = [
             event
