@@ -128,13 +128,30 @@ class StateStore:
             connection.close()
 
     @contextmanager
-    def transaction(self) -> Iterator[Connection]:
-        """Run a caller-supplied operation inside one explicit transaction."""
+    def transaction(self, *, immediate: bool = False) -> Iterator[Connection]:
+        """Run a caller-supplied operation inside one explicit transaction.
+
+        ``immediate=True`` reserves the SQLite write transaction before the
+        first read.  It is used by compare-and-set persistence primitives that
+        must select and mutate one row without a read-to-write race.
+        """
 
         if self._closed:
             raise RuntimeError("StateStore is closed")
-        with self.engine.begin() as connection:
-            yield connection
+        if not immediate:
+            with self.engine.begin() as connection:
+                yield connection
+            return
+
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                yield connection
+            except BaseException:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
 
     def close(self) -> None:
         self.dispose()

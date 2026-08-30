@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Iterable
 
 from sqlalchemy import insert, select, update
 
@@ -263,6 +263,105 @@ class TaskStore:
         with self._state_store.connection() as connection:
             rows = connection.execute(statement).all()
         return [task for row in rows if (task := self._row(row)) is not None]
+
+    def set_status_if(
+        self,
+        task_id: str,
+        *,
+        expected_statuses: Iterable[TaskState | str],
+        status: TaskState | str,
+    ) -> dict[str, Any] | None:
+        """Conditionally persist one status transition and return its row.
+
+        This is a small compare-and-set primitive for later runtime layers.
+        It does not define a transition graph; callers provide the allowed
+        current states for their own bounded operation.
+        """
+
+        normalized_id = _text(task_id, field="task_id", max_length=_MAX_LENGTHS["task_id"])
+        expected = tuple(_state(value).value for value in expected_statuses)
+        if not expected:
+            raise ValueError("expected_statuses must not be empty")
+        next_status = _state(status).value
+        with self._state_store.transaction(immediate=True) as connection:
+            result = connection.execute(
+                update(self._tasks)
+                .where(
+                    self._tasks.c.id == normalized_id,
+                    self._tasks.c.status.in_(expected),
+                )
+                .values(status=next_status)
+            )
+            if result.rowcount != 1:
+                return None
+        return self.get(normalized_id)
+
+    def claim_next_queued(self) -> dict[str, Any] | None:
+        """Atomically claim the next queued Task as ``RUNNING``.
+
+        The write transaction is acquired before selecting the candidate, so
+        competing consumers cannot both observe and claim the same row.  The
+        execution attempt counter is intentionally unchanged; T07 owns the
+        point at which an execution attempt begins.
+        """
+
+        with self._state_store.transaction(immediate=True) as connection:
+            row = connection.execute(
+                select(self._tasks)
+                .where(self._tasks.c.status == TaskState.QUEUED.value)
+                .order_by(
+                    self._tasks.c.priority.desc(),
+                    self._tasks.c.created_at.asc(),
+                    self._tasks.c.id.asc(),
+                )
+                .limit(1)
+            ).first()
+            if row is None:
+                return None
+            task_id = str(row._mapping["id"])
+            result = connection.execute(
+                update(self._tasks)
+                .where(
+                    self._tasks.c.id == task_id,
+                    self._tasks.c.status == TaskState.QUEUED.value,
+                )
+                .values(status=TaskState.RUNNING.value)
+            )
+            if result.rowcount != 1:
+                return None
+        return self.get(task_id)
+
+    def requeue_retryable(
+        self,
+        task_id: str,
+        *,
+        max_retries: int = 3,
+    ) -> dict[str, Any] | None:
+        """Requeue a failed/interrupted Task without incrementing ``attempt``.
+
+        ``attempt`` counts execution attempts, not queue placements.  The
+        queue cap is applied in the conditional update so a retry race cannot
+        pass the limit after a stale read.
+        """
+
+        normalized_id = _text(task_id, field="task_id", max_length=_MAX_LENGTHS["task_id"])
+        retry_cap = _integer(max_retries, field="max_retries")
+        if retry_cap is None or retry_cap < 0:
+            raise ValueError("max_retries must be a non-negative integer")
+        with self._state_store.transaction(immediate=True) as connection:
+            result = connection.execute(
+                update(self._tasks)
+                .where(
+                    self._tasks.c.id == normalized_id,
+                    self._tasks.c.status.in_((TaskState.FAILED.value, TaskState.INTERRUPTED.value)),
+                    self._tasks.c.attempt < self._tasks.c.max_attempts,
+                    self._tasks.c.attempt < retry_cap,
+                )
+                .values(status=TaskState.QUEUED.value)
+            )
+            if result.rowcount != 1:
+                return None
+        return self.get(normalized_id)
 
 
 __all__ = ["TASK_STATUS_VALUES", "TaskState", "TaskStore"]
