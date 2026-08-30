@@ -151,6 +151,14 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--legacy-source",
+        type=Path,
+        help=(
+            "explicit Legacy SQLite source for a production-source rehearsal. "
+            "When omitted, retain the existing isolated-fixture dry-run."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -189,8 +197,20 @@ def main() -> int:
         "logical_sha256": logical_data_fingerprint(CANONICAL_DATABASE)["sha256"],
     }
 
-    source_fixture = run_root / "legacy_fixture.db"
-    create_legacy_v3_fixture(source_fixture)
+    if args.legacy_source is None:
+        source_fixture = run_root / "legacy_fixture.db"
+        create_legacy_v3_fixture(source_fixture)
+        source_kind = "fresh isolated Legacy fixture via SQLite-consistent backup"
+    else:
+        source_fixture = args.legacy_source.expanduser().resolve(strict=False)
+        if source_fixture != CANONICAL_DATABASE:
+            raise SystemExit(
+                "--legacy-source must be the canonical production database; "
+                "use the default isolated fixture for non-production rehearsals"
+            )
+        if not source_fixture.is_file():
+            raise SystemExit(f"canonical Legacy source is missing: {source_fixture}")
+        source_kind = "canonical production Legacy database via SQLite-consistent backup"
     archive_db = archive_root / "legacy_frameflow_v3.db"
     backup = create_backup(source_fixture, archive_db)
     legacy_fp = fingerprint_database(archive_db)
@@ -201,7 +221,7 @@ def main() -> int:
         archive_root / "legacy_fingerprint.json",
         {
             "run_id": run_id,
-            "source_kind": "fresh isolated Legacy fixture via SQLite-consistent backup",
+            "source_kind": source_kind,
             "source_fixture": str(source_fixture),
             "backup": backup,
             "physical": legacy_fp,
