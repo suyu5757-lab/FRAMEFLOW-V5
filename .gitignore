@@ -4,6 +4,9 @@ generated/
 __pycache__/
 .codex-remote-attachments/
 data/
+archives/
+logs/
+tests/*.db*
 tests/test-frameflow-*.db*
 web/node_modules/
 web/dist/

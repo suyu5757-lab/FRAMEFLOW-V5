@@ -14,6 +14,10 @@ from uuid import uuid4
 from core.migration.cutover import fresh_candidate_from_production
 from core.migration.legacy_compat import LegacyReadOnlyCompatibility
 from core.runtime.persistence import RuntimeModeError, create_runtime_persistence
+from core.runtime.persistence.startup_config import (
+    RuntimeStartupConfig,
+    write_runtime_startup_config,
+)
 from core.runtime.state_store.factory import inspect_database, open_runtime_store
 from tests.conftest import isolated_legacy_v3_path
 
@@ -36,6 +40,17 @@ class V5ServerPersistenceTests(unittest.TestCase):
         )
         cls.candidate = Path(result["candidate_path"])
         cls.legacy = Path(result["backup_path"])
+        cls.runtime_config = write_runtime_startup_config(
+            RuntimeStartupConfig.build(
+                runtime_mode="v5",
+                runtime_db=cls.candidate,
+                legacy_readonly_db=cls.legacy,
+                production=False,
+                generated_by="tests.runtime.test_server_v5_persistence",
+                cutover_run_id="isolated-v5-server-test",
+            ),
+            cls.root / "runtime-startup.json",
+        )
 
     def _run_server_probe(self) -> dict[str, object]:
         script = r'''
@@ -95,8 +110,11 @@ print(json.dumps(payload, ensure_ascii=False))
         env = os.environ.copy()
         env.update(
             {
+                "FRAMEFLOW_RUNTIME_CONFIG": str(self.runtime_config),
                 "FRAMEFLOW_RUNTIME_MODE": "v5",
                 "FRAMEFLOW_V5_DB": str(self.candidate),
+                "FRAMEFLOW_V5_PRODUCTION": "0",
+                "FRAMEFLOW_V5_PRODUCTION_SIMULATION": "0",
                 "FRAMEFLOW_LEGACY_READONLY_DB": str(self.legacy),
                 "FRAMEFLOW_BIND_HOST": "127.0.0.1",
             }
@@ -175,20 +193,41 @@ print(json.dumps(payload, ensure_ascii=False))
 
     def test_default_legacy_mode_still_starts_in_an_isolated_database(self) -> None:
         database = Path(tempfile.gettempdir()) / f"frameflow-t03r2-legacy-{uuid4().hex}.db"
+        runtime_config = write_runtime_startup_config(
+            RuntimeStartupConfig.build(
+                runtime_mode="legacy",
+                runtime_db=database,
+                legacy_readonly_db=None,
+                production=False,
+                generated_by="tests.runtime.test_server_v5_persistence",
+            ),
+            database.with_suffix(".runtime-startup.json"),
+        )
         script = r'''
+import json
 from fastapi.testclient import TestClient
 import server
 with TestClient(server.app) as client:
     response = client.get('/api/health')
-    print(response.status_code)
+    print(json.dumps({'status': response.status_code, 'runtime_mode': response.json()['runtime_mode']}))
 '''
         env = os.environ.copy()
-        env.update({"FRAMEFLOW_RUNTIME_MODE": "legacy", "FRAMEFLOW_DB_PATH": str(database), "FRAMEFLOW_BIND_HOST": "127.0.0.1"})
+        env.update({
+            "FRAMEFLOW_RUNTIME_CONFIG": str(runtime_config),
+            "FRAMEFLOW_RUNTIME_MODE": "legacy",
+            "FRAMEFLOW_DB_PATH": str(database),
+            "FRAMEFLOW_V5_PRODUCTION": "0",
+            "FRAMEFLOW_V5_PRODUCTION_SIMULATION": "0",
+            "FRAMEFLOW_BIND_HOST": "127.0.0.1",
+        })
         env.pop("FRAMEFLOW_V5_DB", None)
         env.pop("FRAMEFLOW_LEGACY_READONLY_DB", None)
-        completed = subprocess.run([sys.executable, "-c", script], cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, check=False)
+        try:
+            completed = subprocess.run([sys.executable, "-c", script], cwd=PROJECT_ROOT, env=env, capture_output=True, text=True, check=False)
+        finally:
+            runtime_config.unlink(missing_ok=True)
         self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertEqual("200", completed.stdout.strip())
+        self.assertEqual({"status": 200, "runtime_mode": "legacy"}, json.loads(completed.stdout))
 
     def test_v5_mode_requires_an_explicit_non_production_candidate(self) -> None:
         with self.assertRaises(RuntimeModeError):

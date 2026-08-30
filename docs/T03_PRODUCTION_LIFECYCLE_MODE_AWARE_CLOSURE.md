@@ -627,3 +627,53 @@ REAL INSTALLED TASK LIFECYCLE = VERIFIED
 PRODUCTION CUTOVER = NOT_PERFORMED
 READY FOR FINAL PRODUCTION CUTOVER = YES
 ```
+
+## Final verified production cutover attempt — rolled back — 2026-08-28
+
+Run `T03FINAL-20260828T110620Z-817060f4` executed the one authorized
+production replacement. All pre-swap gates passed, including fresh Legacy
+fingerprints, a 5/5 read-only archive, Candidate A first/restart 19/19 plus
+17/17, Candidate A A0/A1 delta `NONE`, Candidate B unopened validation and
+rename, and A0/B0 equivalence.
+
+The atomic replacement itself passed, but the mandatory first V5 runtime gate
+failed and therefore triggered the single permitted rollback:
+
+```text
+StartTarget expected mode = v5
+StartTarget actual mode = v5
+V5 owner = PID 31956
+V5 listener count = 1
+V5 doctor database = D:\11067\CodexWorkspaces\frameflow-v3\data\frameflow.db
+V5 HTTP health = 200
+V5 health status = not_ready
+V5 ready = false
+```
+
+The V5 database, startup config, and both V5 WAL sidecars were preserved under
+the run evidence. PID 31956 and its remaining exact V5 process-tree members
+were stopped, 8787 became FREE, and the canonical database was restored from
+the same run's archive. `runtime-startup.json` was removed. Formal Legacy
+`StartTarget` and `RestoreLegacy` passed, followed by a real installed Task
+Legacy restart with one healthy 8787 listener.
+
+```text
+Atomic replacement = PASS (one swap)
+V5 first hard gate = FAIL (ready=false)
+Rollback triggered = YES (once)
+Rollback verification = PASS
+Second V5 swap = NO
+Production canonical = LEGACY_V3 / 41 tables / schema 16
+Production integrity = PASS
+Production FK = PASS (0 violations)
+runtime-startup.json = ABSENT
+Installed Task Legacy restart = PASS
+Production cutover = ROLLED_BACK
+T03 FINAL STATUS = FAIL
+READY FOR FINAL PRODUCTION CUTOVER = NO
+```
+
+The detailed run evidence is retained at
+`data/.cutover/T03FINAL-20260828T110620Z-817060f4/`; no V5 restart,
+post-cutover V5 regression, second swap, T00-T03 re-audit, or T05 work was
+started after the hard-gate failure.
