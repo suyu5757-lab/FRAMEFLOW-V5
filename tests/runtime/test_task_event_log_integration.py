@@ -155,6 +155,7 @@ class TaskEventLogIntegrationTests(TestCase):
         self.assertEqual("RUNNING", self.queue.claim_next()["status"])
 
         self.create_task("TASK_T10_CANCEL")
+        self.queue.enqueue("TASK_T10_CANCEL")
         self.queue.cancel("TASK_T10_CANCEL")
 
         self.create_task("TASK_T10_RETRY", status=TaskState.FAILED, attempt=1)
@@ -165,7 +166,7 @@ class TaskEventLogIntegrationTests(TestCase):
             [(item["from_status"], item["to_status"]) for item in self.state_payloads("TASK_T10_CLAIM")],
         )
         self.assertEqual(
-            [("CREATED", "CANCELLED")],
+            [("CREATED", "QUEUED"), ("QUEUED", "CANCELLED")],
             [(item["from_status"], item["to_status"]) for item in self.state_payloads("TASK_T10_CANCEL")],
         )
         retry = self.state_payloads("TASK_T10_RETRY")
