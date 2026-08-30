@@ -1,5 +1,7 @@
 """Runtime components for FRAMEFLOW."""
 
+from importlib import import_module
+
 from .event_log import EventLog, EventLogError, InvalidEventError
 from .worker import (
     HandlerRegistry,
@@ -13,11 +15,47 @@ from .worker import (
     WorkerRunResult,
 )
 
+_SUPERVISOR_EXPORTS = frozenset(
+    {
+        "LivenessResult",
+        "LivenessState",
+        "PROCESS_IDENTITIES",
+        "ProcessInspectionError",
+        "ProcessInspector",
+        "ProcessRecord",
+        "Supervisor",
+        "SupervisorTarget",
+        "UnsupportedTargetError",
+        "WindowsProcessInspector",
+    }
+)
+
+
+def __getattr__(name: str):
+    """Load optional Supervisor exports only when a caller requests them."""
+
+    if name not in _SUPERVISOR_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = import_module(".supervisor", __name__)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
+
 __all__ = [
     "EventLog",
     "EventLogError",
     "HandlerRegistry",
     "InvalidEventError",
+    "LivenessResult",
+    "LivenessState",
+    "PROCESS_IDENTITIES",
+    "ProcessInspectionError",
+    "ProcessInspector",
+    "ProcessRecord",
+    "Supervisor",
+    "SupervisorTarget",
+    "UnsupportedTargetError",
+    "WindowsProcessInspector",
     "TaskExecutionContext",
     "TaskHandler",
     "TaskTimeoutError",
