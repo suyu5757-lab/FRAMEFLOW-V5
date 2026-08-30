@@ -45,7 +45,23 @@ external handler/provider work must occur outside the write transaction.
 
 Existing StateStore CRUD methods may continue to supply their optional event
 specification in their own transaction; T10 adds the explicit EventLog seam
-for Runtime lifecycle code and companion writes.
+for Runtime lifecycle code and companion writes.  The canonical TaskStore now
+uses that seam for Task lifecycle facts:
+
+```text
+Task create       -> TASK_CREATED
+Queue enqueue     -> CREATED -> QUEUED
+Queue claim       -> QUEUED -> RUNNING
+Queue cancel      -> CREATED/QUEUED -> CANCELLED
+Queue retry       -> FAILED/INTERRUPTED -> QUEUED
+Worker success    -> RUNNING -> SUCCEEDED
+Worker failure    -> RUNNING -> FAILED
+```
+
+Each listed mutation and its event share one transaction.  A no-op status
+write and Worker heartbeat do not append a state event.  The Task event
+taxonomy is intentionally limited to `TASK_CREATED` and
+`TASK_STATE_CHANGED`; no new table or migration is introduced.
 
 ## Queries and ordering
 
@@ -61,7 +77,9 @@ mutates the canonical production database.
 
 ## Scope boundaries
 
-T10 does not scan stale workers, change `RUNNING` to `INTERRUPTED`, retry
-Tasks, call Providers, acquire ResourceLocks, or add EventLog history tables.
-Tests use isolated SQLite databases; production is checked read-only for its
-V5 Runtime contract and absence of T10 test rows.
+T10 does not scan stale workers, change `RUNNING` to `INTERRUPTED`, add
+Supervisor liveness, call Providers, acquire ResourceLocks, or add EventLog
+history tables.  Queue retry remains the existing bounded T06 operation; T10
+only records its already-persisted transition.  Tests use isolated SQLite
+databases; production is checked read-only for its V5 Runtime contract and
+absence of T10 test rows.

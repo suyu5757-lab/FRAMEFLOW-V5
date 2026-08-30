@@ -347,6 +347,7 @@ class Worker:
                 worker=self.worker_id,
                 error=error,
                 finished_at=self._clock(),
+                reason_code=str(error.get("code")) if error.get("code") else None,
             )
         except Exception as exc:
             return self._persist_finalization_failure(task, exc)
@@ -382,6 +383,7 @@ class Worker:
                 worker=self.worker_id,
                 error=report,
                 finished_at=self._clock(),
+                reason_code="finalization_failed",
             )
         except Exception:
             failed = None

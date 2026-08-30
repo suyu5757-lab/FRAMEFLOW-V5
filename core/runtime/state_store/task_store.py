@@ -1,9 +1,10 @@
 """Persistent TaskStore for the FRAMEFLOW V5 Runtime.
 
 This module owns task-row persistence only.  It deliberately does not
-schedule work, execute workers, acquire resource locks, submit providers, or
-implement retry/event orchestration.  All database access goes through the
-existing :class:`StateStore` connection and transaction boundaries.
+schedule work, execute workers, acquire resource locks, or submit providers.
+Task lifecycle facts are appended through the existing :class:`StateStore`
+transaction boundary so a Task mutation and its EventLog record commit or
+roll back together.
 """
 
 from __future__ import annotations
@@ -34,6 +35,9 @@ class TaskState(StrEnum):
 
 
 _UNSET = object()
+TASK_ENTITY_TYPE = "TASK"
+TASK_CREATED = "TASK_CREATED"
+TASK_STATE_CHANGED = "TASK_STATE_CHANGED"
 _MAX_LENGTHS = {
     "task_id": 120,
     "task_type": 64,
@@ -92,13 +96,63 @@ def _state(value: TaskState | str) -> TaskState:
 class TaskStore:
     """Small typed persistence facade over the existing V5 ``tasks`` table."""
 
-    def __init__(self, state_store: StateStore) -> None:
+    def __init__(self, state_store: StateStore, *, event_log: Any | None = None) -> None:
         self._state_store = state_store
+        self._event_log = event_log
         self._tasks = metadata.tables["tasks"]
 
     @staticmethod
     def _row(row: Any) -> dict[str, Any] | None:
         return dict(row._mapping) if row is not None else None
+
+    def _append_event(
+        self,
+        connection: Any,
+        *,
+        task_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Append a Task event without opening or committing another transaction."""
+
+        if self._event_log is None:
+            # The import is intentionally local: ``EventLog`` depends on the
+            # StateStore package, which imports this module during initialization.
+            from core.runtime.event_log import EventLog
+
+            self._event_log = EventLog(self._state_store)
+
+        self._event_log.append_in_transaction(
+            connection,
+            trace_id=task_id,
+            entity_type=TASK_ENTITY_TYPE,
+            entity_id=task_id,
+            event_type=event_type,
+            payload=payload,
+        )
+
+    def _append_state_event(
+        self,
+        connection: Any,
+        *,
+        task_id: str,
+        from_status: str,
+        to_status: str,
+        reason_code: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "task_id": task_id,
+            "from_status": from_status,
+            "to_status": to_status,
+        }
+        if reason_code is not None:
+            payload["reason_code"] = reason_code
+        self._append_event(
+            connection,
+            task_id=task_id,
+            event_type=TASK_STATE_CHANGED,
+            payload=payload,
+        )
 
     def create(
         self,
@@ -150,6 +204,18 @@ class TaskStore:
 
         with self._state_store.transaction() as connection:
             connection.execute(insert(self._tasks).values(**values))
+            self._append_event(
+                connection,
+                task_id=str(values["id"]),
+                event_type=TASK_CREATED,
+                payload={
+                    "task_id": str(values["id"]),
+                    "task_type": str(values["type"]),
+                    "initial_status": str(values["status"]),
+                    "project_id": values["project_id"],
+                    "shot_id": values["shot_id"],
+                },
+            )
         task = self.get(task_id)
         if task is None:  # pragma: no cover - guards an impossible committed-read race
             raise RuntimeError(f"created task could not be read back: {task_id}")
@@ -222,6 +288,12 @@ class TaskStore:
             return task
 
         with self._state_store.transaction() as connection:
+            current_row = connection.execute(
+                select(self._tasks).where(self._tasks.c.id == normalized_id)
+            ).first()
+            current = self._row(current_row)
+            if current is None:
+                raise KeyError(f"task not found: {normalized_id}")
             result_proxy = connection.execute(
                 update(self._tasks)
                 .where(self._tasks.c.id == normalized_id)
@@ -229,6 +301,16 @@ class TaskStore:
             )
             if result_proxy.rowcount != 1:
                 raise KeyError(f"task not found: {normalized_id}")
+            if (
+                "status" in changes
+                and current["status"] != changes["status"]
+            ):
+                self._append_state_event(
+                    connection,
+                    task_id=normalized_id,
+                    from_status=str(current["status"]),
+                    to_status=str(changes["status"]),
+                )
         task = self.get(normalized_id)
         if task is None:  # pragma: no cover - guards an impossible committed-read race
             raise RuntimeError(f"updated task could not be read back: {normalized_id}")
@@ -270,6 +352,7 @@ class TaskStore:
         *,
         expected_statuses: Iterable[TaskState | str],
         status: TaskState | str,
+        reason_code: str | None = None,
     ) -> dict[str, Any] | None:
         """Conditionally persist one status transition and return its row.
 
@@ -284,16 +367,30 @@ class TaskStore:
             raise ValueError("expected_statuses must not be empty")
         next_status = _state(status).value
         with self._state_store.transaction(immediate=True) as connection:
+            current_row = connection.execute(
+                select(self._tasks).where(self._tasks.c.id == normalized_id)
+            ).first()
+            current = self._row(current_row)
+            if current is None or current["status"] not in expected:
+                return None
             result = connection.execute(
                 update(self._tasks)
                 .where(
                     self._tasks.c.id == normalized_id,
-                    self._tasks.c.status.in_(expected),
+                    self._tasks.c.status == current["status"],
                 )
                 .values(status=next_status)
             )
             if result.rowcount != 1:
                 return None
+            if current["status"] != next_status:
+                self._append_state_event(
+                    connection,
+                    task_id=normalized_id,
+                    from_status=str(current["status"]),
+                    to_status=next_status,
+                    reason_code=reason_code,
+                )
         return self.get(normalized_id)
 
     def claim_next_queued(self) -> dict[str, Any] | None:
@@ -329,6 +426,12 @@ class TaskStore:
             )
             if result.rowcount != 1:
                 return None
+            self._append_state_event(
+                connection,
+                task_id=task_id,
+                from_status=TaskState.QUEUED.value,
+                to_status=TaskState.RUNNING.value,
+            )
         return self.get(task_id)
 
     def begin_execution(
@@ -407,6 +510,7 @@ class TaskStore:
         worker: str,
         result: Any,
         finished_at: datetime,
+        reason_code: str | None = None,
     ) -> dict[str, Any] | None:
         """Persist a successful result only for the owning live Worker."""
 
@@ -432,6 +536,13 @@ class TaskStore:
             )
             if update_result.rowcount != 1:
                 return None
+            self._append_state_event(
+                connection,
+                task_id=normalized_id,
+                from_status=TaskState.RUNNING.value,
+                to_status=TaskState.SUCCEEDED.value,
+                reason_code=reason_code,
+            )
         return self.get(normalized_id)
 
     def finish_failure(
@@ -441,6 +552,7 @@ class TaskStore:
         worker: str,
         error: Any,
         finished_at: datetime,
+        reason_code: str | None = None,
     ) -> dict[str, Any] | None:
         """Persist a structured failure only for the owning live Worker."""
 
@@ -466,6 +578,13 @@ class TaskStore:
             )
             if update_result.rowcount != 1:
                 return None
+            self._append_state_event(
+                connection,
+                task_id=normalized_id,
+                from_status=TaskState.RUNNING.value,
+                to_status=TaskState.FAILED.value,
+                reason_code=reason_code,
+            )
         return self.get(normalized_id)
 
     def requeue_retryable(
@@ -486,11 +605,25 @@ class TaskStore:
         if retry_cap is None or retry_cap < 0:
             raise ValueError("max_retries must be a non-negative integer")
         with self._state_store.transaction(immediate=True) as connection:
+            current_row = connection.execute(
+                select(self._tasks).where(self._tasks.c.id == normalized_id)
+            ).first()
+            current = self._row(current_row)
+            if current is None:
+                return None
+            current_status = str(current["status"])
+            current_attempt = int(current["attempt"])
+            if (
+                current_status not in {TaskState.FAILED.value, TaskState.INTERRUPTED.value}
+                or current_attempt >= int(current["max_attempts"])
+                or current_attempt >= retry_cap
+            ):
+                return None
             result = connection.execute(
                 update(self._tasks)
                 .where(
                     self._tasks.c.id == normalized_id,
-                    self._tasks.c.status.in_((TaskState.FAILED.value, TaskState.INTERRUPTED.value)),
+                    self._tasks.c.status == current_status,
                     self._tasks.c.attempt < self._tasks.c.max_attempts,
                     self._tasks.c.attempt < retry_cap,
                 )
@@ -504,7 +637,20 @@ class TaskStore:
             )
             if result.rowcount != 1:
                 return None
+            self._append_state_event(
+                connection,
+                task_id=normalized_id,
+                from_status=current_status,
+                to_status=TaskState.QUEUED.value,
+            )
         return self.get(normalized_id)
 
 
-__all__ = ["TASK_STATUS_VALUES", "TaskState", "TaskStore"]
+__all__ = [
+    "TASK_CREATED",
+    "TASK_ENTITY_TYPE",
+    "TASK_STATE_CHANGED",
+    "TASK_STATUS_VALUES",
+    "TaskState",
+    "TaskStore",
+]
