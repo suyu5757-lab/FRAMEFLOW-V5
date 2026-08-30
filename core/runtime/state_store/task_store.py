@@ -331,6 +331,143 @@ class TaskStore:
                 return None
         return self.get(task_id)
 
+    def begin_execution(
+        self,
+        task_id: str,
+        *,
+        worker: str,
+        started_at: datetime,
+    ) -> dict[str, Any] | None:
+        """Atomically take execution ownership and increment ``attempt`` once.
+
+        T06 changes ``QUEUED`` to ``RUNNING`` before a Worker exists.  This
+        primitive is the T07 execution boundary: only a still-unowned
+        ``RUNNING`` row can be started, and the increment happens in the same
+        short write transaction as worker/timestamp ownership.
+        """
+
+        normalized_id = _text(task_id, field="task_id", max_length=_MAX_LENGTHS["task_id"])
+        normalized_worker = _text(worker, field="worker", max_length=_MAX_LENGTHS["worker"])
+        if not isinstance(started_at, datetime):
+            raise ValueError("started_at must be a datetime")
+        with self._state_store.transaction(immediate=True) as connection:
+            result = connection.execute(
+                update(self._tasks)
+                .where(
+                    self._tasks.c.id == normalized_id,
+                    self._tasks.c.status == TaskState.RUNNING.value,
+                    self._tasks.c.worker.is_(None),
+                    self._tasks.c.started_at.is_(None),
+                )
+                .values(
+                    worker=normalized_worker,
+                    attempt=self._tasks.c.attempt + 1,
+                    started_at=started_at,
+                    heartbeat_at=started_at,
+                    finished_at=None,
+                    result_json=None,
+                    error_json=None,
+                )
+            )
+            if result.rowcount != 1:
+                return None
+        return self.get(normalized_id)
+
+    def touch_heartbeat(
+        self,
+        task_id: str,
+        *,
+        worker: str,
+        heartbeat_at: datetime,
+    ) -> dict[str, Any] | None:
+        """Update a live Worker heartbeat without changing Task ownership."""
+
+        normalized_id = _text(task_id, field="task_id", max_length=_MAX_LENGTHS["task_id"])
+        normalized_worker = _text(worker, field="worker", max_length=_MAX_LENGTHS["worker"])
+        if not isinstance(heartbeat_at, datetime):
+            raise ValueError("heartbeat_at must be a datetime")
+        with self._state_store.transaction() as connection:
+            result = connection.execute(
+                update(self._tasks)
+                .where(
+                    self._tasks.c.id == normalized_id,
+                    self._tasks.c.status == TaskState.RUNNING.value,
+                    self._tasks.c.worker == normalized_worker,
+                )
+                .values(heartbeat_at=heartbeat_at)
+            )
+            if result.rowcount != 1:
+                return None
+        return self.get(normalized_id)
+
+    def finish_success(
+        self,
+        task_id: str,
+        *,
+        worker: str,
+        result: Any,
+        finished_at: datetime,
+    ) -> dict[str, Any] | None:
+        """Persist a successful result only for the owning live Worker."""
+
+        normalized_id = _text(task_id, field="task_id", max_length=_MAX_LENGTHS["task_id"])
+        normalized_worker = _text(worker, field="worker", max_length=_MAX_LENGTHS["worker"])
+        if not isinstance(finished_at, datetime):
+            raise ValueError("finished_at must be a datetime")
+        result_json = None if result is None else _json_text(result, field="result")
+        with self._state_store.transaction() as connection:
+            update_result = connection.execute(
+                update(self._tasks)
+                .where(
+                    self._tasks.c.id == normalized_id,
+                    self._tasks.c.status == TaskState.RUNNING.value,
+                    self._tasks.c.worker == normalized_worker,
+                )
+                .values(
+                    status=TaskState.SUCCEEDED.value,
+                    result_json=result_json,
+                    error_json=None,
+                    finished_at=finished_at,
+                )
+            )
+            if update_result.rowcount != 1:
+                return None
+        return self.get(normalized_id)
+
+    def finish_failure(
+        self,
+        task_id: str,
+        *,
+        worker: str,
+        error: Any,
+        finished_at: datetime,
+    ) -> dict[str, Any] | None:
+        """Persist a structured failure only for the owning live Worker."""
+
+        normalized_id = _text(task_id, field="task_id", max_length=_MAX_LENGTHS["task_id"])
+        normalized_worker = _text(worker, field="worker", max_length=_MAX_LENGTHS["worker"])
+        if not isinstance(finished_at, datetime):
+            raise ValueError("finished_at must be a datetime")
+        error_json = None if error is None else _json_text(error, field="error")
+        with self._state_store.transaction() as connection:
+            update_result = connection.execute(
+                update(self._tasks)
+                .where(
+                    self._tasks.c.id == normalized_id,
+                    self._tasks.c.status == TaskState.RUNNING.value,
+                    self._tasks.c.worker == normalized_worker,
+                )
+                .values(
+                    status=TaskState.FAILED.value,
+                    result_json=None,
+                    error_json=error_json,
+                    finished_at=finished_at,
+                )
+            )
+            if update_result.rowcount != 1:
+                return None
+        return self.get(normalized_id)
+
     def requeue_retryable(
         self,
         task_id: str,
@@ -357,7 +494,13 @@ class TaskStore:
                     self._tasks.c.attempt < self._tasks.c.max_attempts,
                     self._tasks.c.attempt < retry_cap,
                 )
-                .values(status=TaskState.QUEUED.value)
+                .values(
+                    status=TaskState.QUEUED.value,
+                    worker=None,
+                    started_at=None,
+                    heartbeat_at=None,
+                    finished_at=None,
+                )
             )
             if result.rowcount != 1:
                 return None
