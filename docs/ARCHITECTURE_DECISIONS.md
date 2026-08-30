@@ -48,7 +48,24 @@ These ADRs are the T00 architecture freeze. They record decisions from the V5.3.
 
 ## ADR-008 — Resource Locks
 
-**Decision:** `resource_locks` is a persistent MVP table. The lock resources are `PHOTOSHOP`, `AFTER_EFFECTS`, `RESOLVE`, and `COMFY_GPU`; leases expire after 300 seconds and heartbeat every 30 seconds. `COMFY_GPU` may run concurrently with Photoshop. Photoshop, After Effects, and Resolve are mutually exclusive with one another.
+**Decision:** `resource_locks` is a persistent MVP table. The lock resources are `PHOTOSHOP`, `AFTER_EFFECTS`, `RESOLVE`, and `COMFY_GPU`; leases expire after 300 seconds and heartbeat every 30 seconds. The V5.3.2 Resource Compatibility Matrix is:
+
+| Resource pair | Rule |
+|---|---|
+| `PHOTOSHOP` + `AFTER_EFFECTS` | Mutually exclusive |
+| `PHOTOSHOP` + `RESOLVE` | Mutually exclusive |
+| `AFTER_EFFECTS` + `RESOLVE` | Mutually exclusive |
+| `COMFY_GPU` + `PHOTOSHOP` | Concurrent execution allowed |
+| `COMFY_GPU` + `AFTER_EFFECTS` | Mutually exclusive |
+| `COMFY_GPU` + `RESOLVE` | Mutually exclusive |
+
+The `COMFY_GPU` policy is conservative production safety for the target
+machine (RTX 4060 Laptop, 8GB VRAM). Photoshop concurrency remains allowed
+for the image/control GPU workflow, while After Effects and DaVinci Resolve
+may use GPU acceleration and VRAM during production workloads. Reliability
+and deterministic resource behavior therefore take priority over maximum
+local concurrency. A future hardware or benchmark review may introduce a
+new capability/resource-profile ADR; it does not change the V5.3.2 matrix.
 
 **Consequence:** Creative Apps and GPU work cannot silently contend for stateful software or hardware. Lock ownership and recovery are visible through Runtime state.
 

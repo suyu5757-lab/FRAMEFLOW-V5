@@ -84,6 +84,14 @@ ResourceLock is persistent and required for Creative Apps and GPU work. The reso
 | `PHOTOSHOP` + `AFTER_EFFECTS` | Mutually exclusive |
 | `PHOTOSHOP` + `RESOLVE` | Mutually exclusive |
 | `AFTER_EFFECTS` + `RESOLVE` | Mutually exclusive |
+| `COMFY_GPU` + `AFTER_EFFECTS` | Mutually exclusive |
+| `COMFY_GPU` + `RESOLVE` | Mutually exclusive |
+
+For V5.3.2, Photoshop, After Effects, and Resolve are mutually exclusive
+with one another, while COMFY_GPU may run concurrently with Photoshop and
+conflicts with After Effects and Resolve. This is a conservative production
+safety policy for the target RTX 4060 Laptop with 8GB VRAM; future hardware
+or benchmark changes require an explicit architecture decision.
 
 Provider Submit is idempotent. The key includes `shot_spec_version`:
 
