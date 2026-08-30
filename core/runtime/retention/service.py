@@ -9,16 +9,19 @@ provider, or resource-lock rows are changed.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from sqlalchemy import select, update
 
 from core.schemas.runtime_mvp import metadata
+
+from .config import ArchiveRetentionConfig, DEFAULT_RETENTION_CONFIG_PATH
 
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,120}$")
@@ -47,8 +50,14 @@ class RetentionPolicy:
     def __post_init__(self) -> None:
         if self.keep_last_generations_per_shot < 0:
             raise ValueError("keep_last_generations_per_shot must be non-negative")
-        if self.max_archive_size_gb is not None and self.max_archive_size_gb < 0:
-            raise ValueError("max_archive_size_gb must be non-negative")
+        if self.max_archive_size_gb is not None:
+            if (
+                isinstance(self.max_archive_size_gb, bool)
+                or not isinstance(self.max_archive_size_gb, (int, float))
+                or not math.isfinite(float(self.max_archive_size_gb))
+                or float(self.max_archive_size_gb) <= 0
+            ):
+                raise ValueError("max_archive_size_gb must be finite and greater than zero")
 
 
 def _within(path: Path, root: Path) -> bool:
@@ -112,6 +121,9 @@ class RetentionService:
         projects_root: Path | str | None = None,
         archive_root: Path | str | None = None,
         policy: RetentionPolicy | None = None,
+        config_path: Path | str | None = None,
+        archive_size_provider: Callable[[], int] | None = None,
+        candidate_size_provider: Callable[[Mapping[str, Any]], int] | None = None,
     ) -> None:
         self.store = store
         self.projects_root = (
@@ -124,7 +136,12 @@ class RetentionService:
             if archive_root is not None
             else (self.projects_root.parent.parent / "archives").resolve(strict=False)
         )
-        self.policy = policy or RetentionPolicy()
+        if policy is None:
+            config = ArchiveRetentionConfig.read(config_path or DEFAULT_RETENTION_CONFIG_PATH)
+            policy = RetentionPolicy(max_archive_size_gb=config.max_archive_size_gb)
+        self.policy = policy
+        self.archive_size_provider = archive_size_provider
+        self.candidate_size_provider = candidate_size_provider
 
     def project_root(self, project_id: str) -> Path:
         project_id = _safe_id(project_id, "project_id")
@@ -195,7 +212,12 @@ class RetentionService:
         raw_path = str(row.get("path") or "")
         source, reason = self._source_path(project_id, raw_path)
         destination = self._destination(project_id, shot_id, generation_id, source)
-        size = source.stat().st_size if reason is None else None
+        actual_size = source.stat().st_size if reason is None else None
+        size = actual_size
+        if reason is None and self.candidate_size_provider is not None:
+            size = int(self.candidate_size_provider({"artifact_id": str(row.get("id")), "path": str(source)}))
+            if size < 0:
+                raise RetentionError("INVALID_CANDIDATE_SIZE", "Candidate size provider returned a negative value.")
         already_archived = (
             str(row.get("status") or "").upper() == "ARCHIVED"
             and _within(source, archive_destination)
@@ -210,6 +232,7 @@ class RetentionService:
             "destination_path": str(destination),
             "sha256": row.get("sha256"),
             "size_bytes": size,
+            "actual_size_bytes": actual_size,
             "status": row.get("status"),
             "source_reason": reason,
             "already_archived": already_archived,
@@ -224,6 +247,11 @@ class RetentionService:
         return rows
 
     def _archive_size_bytes(self) -> int:
+        if self.archive_size_provider is not None:
+            value = int(self.archive_size_provider())
+            if value < 0:
+                raise RetentionError("INVALID_ARCHIVE_SIZE", "Archive size provider returned a negative value.")
+            return value
         if not self.archive_root.is_dir():
             return 0
         total = 0
@@ -239,21 +267,38 @@ class RetentionService:
                     continue
         return total
 
-    def _size_report(self, current_bytes: int, projected_bytes: int) -> dict[str, Any]:
+    def archive_usage_bytes(self) -> int:
+        """Return only the T04-managed archive namespace usage."""
+
+        return self._archive_size_bytes()
+
+    def _size_report(self, current_bytes: int, candidate_bytes: int, projected_bytes: int) -> dict[str, Any]:
         threshold = self.policy.max_archive_size_gb
         if threshold is None:
             return {
                 "current_bytes": current_bytes,
+                "current_archive_size_bytes": current_bytes,
+                "candidate_size_bytes": candidate_bytes,
                 "projected_bytes": projected_bytes,
+                "projected_archive_size_bytes": projected_bytes,
                 "threshold_gb": None,
+                "max_archive_size_gb": None,
+                "max_archive_size_bytes": None,
                 "threshold_status": "not_configured",
                 "warning_code": "ARCHIVE_SIZE_THRESHOLD_DECISION_REQUIRED",
             }
-        exceeded = projected_bytes > threshold * 1024**3
+        threshold_bytes = threshold * 1024**3
+        exceeded = projected_bytes >= threshold_bytes
         return {
             "current_bytes": current_bytes,
+            "current_archive_size_bytes": current_bytes,
+            "candidate_size_bytes": candidate_bytes,
             "projected_bytes": projected_bytes,
+            "projected_archive_size_bytes": projected_bytes,
             "threshold_gb": threshold,
+            "max_archive_size_gb": threshold,
+            "threshold_bytes": threshold_bytes,
+            "max_archive_size_bytes": threshold_bytes,
             "threshold_status": "warning" if exceeded else "ok",
             "warning_code": "ARCHIVE_SIZE_THRESHOLD_EXCEEDED" if exceeded else None,
         }
@@ -280,7 +325,9 @@ class RetentionService:
 
         artifacts_by_id = {str(row["id"]): row for row in artifacts}
         units: list[dict[str, Any]] = []
-        projected_bytes = self._archive_size_bytes()
+        current_archive_bytes = self._archive_size_bytes()
+        candidate_bytes = 0
+        projected_bytes = current_archive_bytes
         grouped: dict[str, list[dict[str, Any]]] = {}
         for generation in generation_scope:
             shot = shots.get(str(generation.get("shot_id")))
@@ -429,7 +476,9 @@ class RetentionService:
                 unique_reasons = list(dict.fromkeys(reasons))
                 action = "protect" if unique_reasons else "archive"
                 if action == "archive":
-                    projected_bytes += sum(int(entry["size_bytes"] or 0) for entry in entries)
+                    unit_size = sum(int(entry["size_bytes"] or 0) for entry in entries)
+                    candidate_bytes += unit_size
+                    projected_bytes += unit_size
                 units.append({
                     "project_id": pid,
                     "shot_id": shot_id,
@@ -440,7 +489,7 @@ class RetentionService:
                     "artifacts": entries,
                 })
 
-        size = self._size_report(self._archive_size_bytes(), projected_bytes)
+        size = self._size_report(current_archive_bytes, candidate_bytes, projected_bytes)
         return {
             "status": "PLANNED",
             "dry_run": True,
@@ -462,7 +511,7 @@ class RetentionService:
             destination = Path(str(entry["destination_path"]))
             if not destination.is_file():
                 raise RetentionError("DESTINATION_VERIFICATION_FAILED", "Moved artifact is missing at destination.", {"path": str(destination)})
-            expected_size = entry.get("size_bytes")
+            expected_size = entry.get("actual_size_bytes", entry.get("size_bytes"))
             if expected_size is not None and destination.stat().st_size != int(expected_size):
                 raise RetentionError("DESTINATION_VERIFICATION_FAILED", "Moved artifact size changed.", {"path": str(destination)})
             actual = _sha256(destination)

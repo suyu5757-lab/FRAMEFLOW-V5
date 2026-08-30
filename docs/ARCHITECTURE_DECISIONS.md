@@ -111,6 +111,20 @@ new capability/resource-profile ADR; it does not change the V5.3.2 matrix.
 
 **Consequence:** Each app has a clear scope, uses ResourceLock, and follows non-destructive rollback: new Photoshop versions, AEP snapshot/duplicate, or Resolve duplicate timeline. Resolve auto-assembly is not part of T48 Milestone 1 closure.
 
+## ADR-016 — T04 Archive Retention Threshold
+
+**Decision:** FRAMEFLOW V5.3.2 freezes `max_archive_size_gb` at `100` GB in
+`config/runtime-retention.json`. This is a warning-only projected-usage
+threshold: `current_archive_size_bytes + candidate_size_bytes >= 100 GB`
+emits `ARCHIVE_SIZE_THRESHOLD_EXCEEDED`.
+
+**Consequence:** The threshold is not a filesystem quota and never triggers
+automatic deletion, purge, rotation, approved-generation deletion, locked
+master deletion, migration-archive deletion, or Legacy evidence deletion.
+Missing, malformed, non-finite, zero, and negative values are configuration
+errors. Crossing the threshold requires explicit operator awareness and a later
+maintenance decision.
+
 ## Freeze rules
 
 - Implementation, bug fixes, performance work, provider adapters, workflow/recipe additions, and UI refinement may follow the frozen decisions.

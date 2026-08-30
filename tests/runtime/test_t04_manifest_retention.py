@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -10,7 +11,14 @@ from sqlalchemy import insert, update
 
 from core.schemas.runtime_mvp import metadata
 from core.runtime.manifest import AtomicJsonWriter, ManifestExportError, ManifestExporter
-from core.runtime.retention import RetentionError, RetentionPolicy, RetentionService
+from core.runtime.retention import (
+    ArchiveRetentionConfig,
+    DEFAULT_RETENTION_CONFIG_PATH,
+    RetentionConfigError,
+    RetentionError,
+    RetentionPolicy,
+    RetentionService,
+)
 from core.runtime.state_store import StateStore
 
 
@@ -261,3 +269,124 @@ def test_t04_partial_archived_generation_is_protected(isolated_store) -> None:
     unit = service.plan("PRJ_T04")["units"][0]
     assert unit["action"] == "protect"
     assert unit["reasons"] == ["partial_archive"]
+
+
+def _threshold_service(
+    isolated_store,
+    current_gb: float,
+    candidate_gb: float,
+) -> RetentionService:
+    store, projects_root, archive_root = isolated_store
+    _generation(store, projects_root, "GEN_THRESHOLD", created_at=datetime(2025, 1, 1, tzinfo=UTC))
+    gib = 1024**3
+    return RetentionService(
+        store,
+        projects_root=projects_root,
+        archive_root=archive_root,
+        policy=RetentionPolicy(keep_last_generations_per_shot=0, max_archive_size_gb=100),
+        archive_size_provider=lambda: int(current_gb * gib),
+        candidate_size_provider=lambda _entry: int(candidate_gb * gib),
+    )
+
+
+def test_t04_c01_formal_config_is_100_gb(isolated_store) -> None:
+    store, projects_root, archive_root = isolated_store
+    config = ArchiveRetentionConfig.read(DEFAULT_RETENTION_CONFIG_PATH)
+    assert config.max_archive_size_gb == 100
+    service = RetentionService(
+        store,
+        projects_root=projects_root,
+        archive_root=archive_root,
+        config_path=DEFAULT_RETENTION_CONFIG_PATH,
+    )
+    assert service.policy.max_archive_size_gb == 100
+
+
+def test_t04_c02_below_threshold_does_not_warn(isolated_store) -> None:
+    size = _threshold_service(isolated_store, 80, 5).plan("PRJ_T04")["archive_size"]
+    assert size["projected_archive_size_bytes"] == 85 * 1024**3
+    assert size["warning_code"] is None
+
+
+def test_t04_c03_exact_threshold_warns_inclusively(isolated_store) -> None:
+    size = _threshold_service(isolated_store, 90, 10).plan("PRJ_T04")["archive_size"]
+    assert size["projected_archive_size_bytes"] == 100 * 1024**3
+    assert size["warning_code"] == "ARCHIVE_SIZE_THRESHOLD_EXCEEDED"
+
+
+def test_t04_c04_above_threshold_warns(isolated_store) -> None:
+    size = _threshold_service(isolated_store, 99, 2).plan("PRJ_T04")["archive_size"]
+    assert size["projected_archive_size_bytes"] == 101 * 1024**3
+    assert size["warning_code"] == "ARCHIVE_SIZE_THRESHOLD_EXCEEDED"
+
+
+def test_t04_c05_warning_is_only_a_warning_and_never_deletes(isolated_store) -> None:
+    service = _threshold_service(isolated_store, 99, 2)
+    plan = service.plan("PRJ_T04")
+    assert plan["warnings"] == ["ARCHIVE_SIZE_THRESHOLD_EXCEEDED"]
+    result = service.apply(plan)
+    assert result["status"] == "APPLIED", result
+    assert result["failed"] == []
+
+
+def test_t04_c06_c07_threshold_does_not_remove_approved_or_locked_protection(isolated_store) -> None:
+    store, projects_root, archive_root = isolated_store
+    _old_root, ids = _generation(store, projects_root, "GEN_LOCKED", created_at=datetime(2025, 1, 1, tzinfo=UTC))
+    _generation(store, projects_root, "GEN_APPROVED", created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    _generation(store, projects_root, "GEN_CANDIDATE", created_at=datetime(2024, 1, 1, tzinfo=UTC))
+    store.create_asset("ASSET_LOCKED_THRESHOLD", "PRJ_T04", "character", "1", status="LOCKED", master_artifact_id=ids[0])
+    with store.transaction() as connection:
+        connection.execute(
+            insert(metadata.tables["reviews"]).values(
+                id="REV_APPROVED_THRESHOLD", shot_id="SH_T04", generation_id="GEN_APPROVED",
+                qa_json="{}", decision="APPROVED", created_at=datetime(2026, 1, 2, tzinfo=UTC),
+            )
+        )
+    gib = 1024**3
+    service = RetentionService(
+        store,
+        projects_root=projects_root,
+        archive_root=archive_root,
+        policy=RetentionPolicy(keep_last_generations_per_shot=0, max_archive_size_gb=100),
+        archive_size_provider=lambda: 99 * gib,
+        candidate_size_provider=lambda _entry: 2 * gib,
+    )
+    plan = service.plan("PRJ_T04")
+    units = {unit["generation_id"]: unit for unit in plan["units"]}
+    assert plan["warnings"] == ["ARCHIVE_SIZE_THRESHOLD_EXCEEDED"]
+    assert "locked_asset_master" in units["GEN_LOCKED"]["reasons"]
+    assert "approved_generation" in units["GEN_APPROVED"]["reasons"]
+    assert store.get_artifact(ids[0])["status"] == "READY"
+
+
+def test_t04_c08_migration_namespace_is_excluded_from_managed_size(isolated_store) -> None:
+    store, projects_root, archive_root = isolated_store
+    migration = archive_root / "migrations" / "v5.3.2" / "legacy.db"
+    managed = archive_root / "PRJ_TEST" / "SH001" / "GEN001" / "artifact.bin"
+    migration.parent.mkdir(parents=True, exist_ok=True)
+    managed.parent.mkdir(parents=True, exist_ok=True)
+    migration.write_bytes(b"migration-evidence")
+    managed.write_bytes(b"managed")
+    before = _sha256(migration)
+    service = RetentionService(store, projects_root=projects_root, archive_root=archive_root, policy=RetentionPolicy(max_archive_size_gb=100))
+    assert service.archive_usage_bytes() == managed.stat().st_size
+    assert _sha256(migration) == before
+
+
+def test_t04_c09_invalid_threshold_values_are_rejected() -> None:
+    for value in (0, -1, float("nan"), float("inf"), "100", True):
+        with pytest.raises(RetentionConfigError):
+            ArchiveRetentionConfig.from_mapping({"max_archive_size_gb": value})
+        with pytest.raises(ValueError):
+            RetentionPolicy(max_archive_size_gb=value)
+
+
+def test_t04_c10_missing_threshold_config_fails_explicitly(isolated_store, tmp_path: Path) -> None:
+    store, projects_root, archive_root = isolated_store
+    missing = tmp_path / "missing-retention.json"
+    with pytest.raises(RetentionConfigError, match="RETENTION_CONFIG_MISSING"):
+        RetentionService(store, projects_root=projects_root, archive_root=archive_root, config_path=missing)
+    invalid = tmp_path / "invalid-retention.json"
+    invalid.write_text(json.dumps({"max_archive_size_gb": None}), encoding="utf-8")
+    with pytest.raises(RetentionConfigError, match="RETENTION_CONFIG_INVALID"):
+        RetentionService(store, projects_root=projects_root, archive_root=archive_root, config_path=invalid)

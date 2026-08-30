@@ -49,9 +49,17 @@ compensation cannot restore every source, the result is
 
 ## Archive size
 
-No numeric `max_archive_size_gb` value was frozen in the existing repository
-contracts. T04 therefore supports an explicit optional configuration and does
-not invent a threshold. Without one, a plan reports
-`ARCHIVE_SIZE_THRESHOLD_DECISION_REQUIRED`; with one, it reports the current
-and projected sizes and an `ok`/`warning` status. T04 does not silently purge
-or auto-retain at startup.
+The approved V5.3.2 T04 Closure decision freezes
+`max_archive_size_gb = 100` in `config/runtime-retention.json`. It is a
+warning-only threshold, not a filesystem quota or an automatic purge,
+deletion, or rotation trigger. The warning condition is inclusive:
+`current_archive_size_bytes + candidate_size_bytes >= 100 * 1024**3` emits
+`ARCHIVE_SIZE_THRESHOLD_EXCEEDED` with current, candidate, projected, and
+threshold byte values. The calculation only counts the managed
+`archives/<project_id>/<shot_id>/<generation_id>/` namespace and excludes
+`archives/migrations/`.
+
+The service reads this formal config when no test policy is injected. Missing,
+malformed, non-finite, zero, and negative values fail explicitly; there is no
+silent fallback. Crossing the warning never changes keep-last, approved, or
+locked-master protection and never deletes any archive or Legacy evidence.
