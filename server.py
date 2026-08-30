@@ -42,6 +42,8 @@ from frameflow.story import story_checks, story_document
 from frameflow.upload_storage import UploadTooLarge, cleanup_file, cleanup_staged_upload, finalize_staged_upload, stage_upload
 from core.runtime.persistence import RuntimeModeError, RuntimePersistence, RuntimePersistenceError, create_runtime_persistence, resolve_runtime_environment, resolve_runtime_mode
 from core.runtime.readiness import evaluate_capabilities, readiness_summary
+from core.runtime.recovery import RestartRecovery
+from core.runtime.state_store import TaskStore
 
 ROOT=Path(__file__).resolve().parent; DATA_DIR=ROOT/"data"; DEFAULT_DATA_DIR=DATA_DIR; GENERATED_DIR=ROOT/"generated"; STUDIO_DIST=ROOT/"web"/"dist"; GENERATED_AUDIO_DIR=GENERATED_DIR/"audio"; REFERENCE_AUDIO_DIR=GENERATED_AUDIO_DIR/"references"
 RUNTIME_ENVIRONMENT=resolve_runtime_environment()
@@ -195,12 +197,17 @@ async def lifespan(application:FastAPI):
     global DATA_DIR, GENERATED_DIR, GENERATED_AUDIO_DIR, REFERENCE_AUDIO_DIR
     ensure_loopback_bind(requested_bind_host())
     if RUNTIME_MODE == "v5":
+        runtime: RuntimePersistence | None = None
         try:
             runtime = create_runtime_persistence(environment=RUNTIME_ENVIRONMENT)
-        except RuntimeModeError:
+            recovery_report = RestartRecovery(TaskStore(runtime.store)).recover_startup()
+        except Exception:
+            if runtime is not None:
+                runtime.dispose()
             raise
         application.state.runtime_mode = "v5"
         application.state.persistence = runtime
+        application.state.startup_recovery = recovery_report
         application.state.db = runtime
         try:
             yield

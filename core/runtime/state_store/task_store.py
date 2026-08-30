@@ -587,6 +587,62 @@ class TaskStore:
             )
         return self.get(normalized_id)
 
+    def interrupt_running_if(
+        self,
+        task_id: str,
+        *,
+        expected_worker: str | None | object = _UNSET,
+        error: Any,
+        recovered_at: datetime,
+        reason_code: str,
+    ) -> dict[str, Any] | None:
+        """Atomically mark one still-running Task as interrupted.
+
+        ``expected_worker`` makes the startup scan compare-and-set safe: a
+        concurrent owner change cannot be overwritten by a stale scan result.
+        The worker value is intentionally preserved as interruption evidence.
+        """
+
+        normalized_id = _text(task_id, field="task_id", max_length=_MAX_LENGTHS["task_id"])
+        normalized_reason = _text(reason_code, field="reason_code", max_length=120)
+        if not isinstance(recovered_at, datetime):
+            raise ValueError("recovered_at must be a datetime")
+        error_json = _json_text(error, field="error")
+        conditions = [
+            self._tasks.c.id == normalized_id,
+            self._tasks.c.status == TaskState.RUNNING.value,
+        ]
+        if expected_worker is not _UNSET:
+            if expected_worker is None:
+                conditions.append(self._tasks.c.worker.is_(None))
+            else:
+                normalized_worker = _text(
+                    expected_worker,
+                    field="expected_worker",
+                    max_length=_MAX_LENGTHS["worker"],
+                )
+                conditions.append(self._tasks.c.worker == normalized_worker)
+        with self._state_store.transaction(immediate=True) as connection:
+            result = connection.execute(
+                update(self._tasks)
+                .where(*conditions)
+                .values(
+                    status=TaskState.INTERRUPTED.value,
+                    error_json=error_json,
+                    finished_at=recovered_at,
+                )
+            )
+            if result.rowcount != 1:
+                return None
+            self._append_state_event(
+                connection,
+                task_id=normalized_id,
+                from_status=TaskState.RUNNING.value,
+                to_status=TaskState.INTERRUPTED.value,
+                reason_code=normalized_reason,
+            )
+        return self.get(normalized_id)
+
     def requeue_retryable(
         self,
         task_id: str,
