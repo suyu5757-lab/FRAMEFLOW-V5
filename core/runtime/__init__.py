@@ -1,5 +1,6 @@
 """Runtime components for FRAMEFLOW."""
 
+from .event_log import EventLog, EventLogError, InvalidEventError
 from .worker import (
     HandlerRegistry,
     TaskExecutionContext,
@@ -13,7 +14,10 @@ from .worker import (
 )
 
 __all__ = [
+    "EventLog",
+    "EventLogError",
     "HandlerRegistry",
+    "InvalidEventError",
     "TaskExecutionContext",
     "TaskHandler",
     "TaskTimeoutError",
