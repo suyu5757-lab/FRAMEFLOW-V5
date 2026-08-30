@@ -17,6 +17,12 @@ does not dump task payloads, task errors, event payloads, provider request data,
 resource-lock state, or secrets. JSON columns retain their database column name
 and are serialized as parsed JSON when valid.
 
+Artifact provenance includes nullable `generation_id`. The exporter projects
+this field exactly as stored: package/input/reference Artifacts remain NULL,
+while a Generation result Artifact points to its owning Generation. SQLite is
+still authoritative; exporting this relation does not create an import path
+or permit Manifest data to override Runtime state.
+
 The final JSON file is written with canonical serialization from
 `frameflow.idempotency.canonical_json`, followed by flush, `fsync`, and
 `os.replace`. A write failure leaves the previous final file byte-identical;

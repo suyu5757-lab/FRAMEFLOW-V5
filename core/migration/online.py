@@ -8,7 +8,7 @@ from alembic import command
 from alembic.config import Config
 
 from .candidate_b_lifecycle import assert_candidate_b_database_open_allowed
-from .backup import PRODUCTION_DATABASE, BackupError
+from .backup import PRODUCTION_DATABASE, BackupError, create_backup, verify_backup
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -54,3 +54,40 @@ def downgrade_candidate(path: Path | str, revision: str = "base") -> Path:
         raise BackupError(f"candidate database does not exist: {candidate}")
     command.downgrade(_config(candidate), revision)
     return candidate
+
+
+def _production_config(path: Path | str) -> Config:
+    target = Path(path).expanduser().resolve(strict=False)
+    config = Config(str(ALEMBIC_INI))
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{target.as_posix()}")
+    # env.py accepts this only through the reviewed production entry point.
+    config.attributes["frameflow_allow_production_migration"] = True
+    return config
+
+
+def upgrade_production(
+    path: Path | str = PRODUCTION_DATABASE,
+    *,
+    backup_path: Path | str,
+    revision: str = "head",
+) -> dict[str, object]:
+    """Back up and upgrade the canonical V5 database through Alembic.
+
+    The backup is mandatory and is created before Alembic opens the writable
+    production target. This is separate from candidate migration helpers and
+    never creates fixtures or performs a downgrade.
+    """
+
+    target = Path(path).expanduser().resolve(strict=False)
+    if target != PRODUCTION_DATABASE:
+        raise BackupError(
+            f"production upgrade requires the canonical database: {PRODUCTION_DATABASE}"
+        )
+    if not target.is_file():
+        raise BackupError(f"production database does not exist: {target}")
+    backup = create_backup(target, backup_path)
+    verified_backup = verify_backup(backup["backup_path"])
+    if verified_backup["integrity_check"] != "ok" or verified_backup["foreign_key_violations"]:
+        raise BackupError(f"refusing production upgrade from invalid backup: {verified_backup}")
+    command.upgrade(_production_config(target), revision)
+    return {"target_path": str(target), "revision": revision, "backup": verified_backup}

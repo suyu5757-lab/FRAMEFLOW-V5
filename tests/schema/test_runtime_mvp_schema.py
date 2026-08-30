@@ -20,7 +20,7 @@ EXPECTED_COLUMNS = {
     "sequences": {"id", "project_id", "order_index", "created_at"},
     "shots": {"id", "project_id", "sequence_id", "shot_spec_json", "metadata_json", "continuity_in", "continuity_out", "created_at", "updated_at"},
     "assets": {"id", "project_id", "type", "status", "version", "master_artifact_id", "locked_at", "created_at"},
-    "artifacts": {"id", "project_id", "shot_id", "asset_id", "type", "role", "path", "sha256", "version", "source_task_id", "source_artifacts_json", "status", "created_at"},
+    "artifacts": {"id", "project_id", "shot_id", "asset_id", "type", "role", "path", "sha256", "version", "source_task_id", "source_artifacts_json", "generation_id", "status", "created_at"},
     "tasks": {"id", "type", "project_id", "shot_id", "status", "priority", "idempotency_key", "attempt", "max_attempts", "timeout", "worker", "payload_json", "result_json", "error_json", "created_at", "started_at", "heartbeat_at", "finished_at"},
     "events": {"id", "trace_id", "entity_type", "entity_id", "event_type", "payload", "created_at"},
     "resource_locks": {"resource_id", "owner_task_id", "acquired_at", "heartbeat_at", "lease_timeout", "status"},
@@ -42,6 +42,7 @@ class RuntimeMvpSchemaTests(TestCase):
         self.assertIn("master_artifact_id", metadata.tables["assets"].c)
         self.assertIn("asset_id", metadata.tables["artifacts"].c)
         self.assertIn("source_artifacts_json", metadata.tables["artifacts"].c)
+        self.assertIn("generation_id", metadata.tables["artifacts"].c)
         self.assertIn("payload_json", metadata.tables["tasks"].c)
         self.assertIn("result_json", metadata.tables["tasks"].c)
         self.assertIn("error_json", metadata.tables["tasks"].c)
@@ -52,6 +53,14 @@ class RuntimeMvpSchemaTests(TestCase):
         task_constraints = " ".join(str(constraint.sqltext) for constraint in metadata.tables["tasks"].constraints if hasattr(constraint, "sqltext"))
         self.assertIn("WAITING_FOR_RESOURCE", task_constraints)
         self.assertIn("CANCELLED", task_constraints)
+
+    def test_generation_result_binding_is_nullable_and_restrict_fk(self) -> None:
+        column = metadata.tables["artifacts"].c.generation_id
+        self.assertTrue(column.nullable)
+        foreign_keys = list(column.foreign_keys)
+        self.assertEqual(1, len(foreign_keys))
+        self.assertEqual("generations.id", foreign_keys[0].target_fullname)
+        self.assertEqual("RESTRICT", foreign_keys[0].ondelete)
 
     def test_pragmas_are_declared(self) -> None:
         self.assertEqual(

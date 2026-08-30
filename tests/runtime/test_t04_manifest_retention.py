@@ -114,6 +114,35 @@ def test_t04_manifest_is_deterministic_authoritative_and_secret_safe(isolated_st
     assert destination.read_bytes() == first_bytes
 
 
+def test_t04_manifest_exports_generation_result_provenance(isolated_store) -> None:
+    store, projects_root, _archive_root = isolated_store
+    root, _artifact_ids = _generation(store, projects_root, "GEN_PROVENANCE")
+    result_path = root / "result.mp4"
+    store.create_artifact(
+        "ART_GEN_PROVENANCE_RESULT",
+        "PRJ_T04",
+        "video",
+        "provider_result",
+        str(result_path),
+        "1",
+        shot_id="SH_T04",
+        generation_id="GEN_PROVENANCE",
+        status="READY",
+    )
+
+    manifest = ManifestExporter(store, projects_root=projects_root).build_manifest("PRJ_T04")
+    result = next(
+        artifact
+        for artifact in manifest["artifacts"]
+        if artifact["id"] == "ART_GEN_PROVENANCE_RESULT"
+    )
+    assert result["generation_id"] == "GEN_PROVENANCE"
+    package = next(
+        artifact for artifact in manifest["artifacts"] if artifact["id"] == "ART_GEN_PROVENANCE_PACKAGE"
+    )
+    assert package["generation_id"] is None
+
+
 def test_t04_manifest_atomic_failure_preserves_previous_final(tmp_path: Path) -> None:
     destination = tmp_path / "project_manifest.json"
     destination.write_bytes(b"previous\n")

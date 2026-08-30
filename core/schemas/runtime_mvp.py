@@ -152,6 +152,15 @@ artifacts = Table(
     Column("version", String(64), nullable=False),
     Column("source_task_id", String(120)),
     Column("source_artifacts_json", Text, nullable=False, server_default=text("'[]'")),
+    # Nullable output-side provenance: input/reference artifacts remain NULL;
+    # generated/imported result artifacts point to their owning Generation.
+    Column(
+        "generation_id",
+        String(120),
+        ForeignKey("generations.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    ),
     Column("status", String(32), nullable=False, server_default=text("'DRAFT'")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
 )

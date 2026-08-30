@@ -65,7 +65,7 @@ PRAGMA foreign_keys=ON;
 PRAGMA busy_timeout=5000;
 ```
 
-The model preserves `shots.metadata_json`, `tasks.payload_json`, `tasks.result_json`, and `tasks.error_json`. Every artifact must retain provenance to its project, shot/asset where applicable, source task, source artifacts, path, hash, version, role, and status. Package manifests are tracked as artifacts through `generations.package_manifest_artifact_id`; there is no standalone `packages` runtime table in this MVP.
+The model preserves `shots.metadata_json`, `tasks.payload_json`, `tasks.result_json`, and `tasks.error_json`. Every artifact must retain provenance to its project, shot/asset where applicable, source task, source artifacts, path, hash, version, role, and status. Package manifests are tracked as input artifacts through `generations.package_manifest_artifact_id`; generated/imported result artifacts use nullable `artifacts.generation_id` to point to their owning Generation. The Runtime remains an 11-domain-table model (12 SQLite tables including `alembic_version`), with no standalone `packages` or `generation_results` table.
 
 ## Task Runtime, locks, and side effects
 

@@ -29,7 +29,7 @@ PRODUCTION_DATABASE = (PROJECT_ROOT / "data" / "frameflow.db").resolve()
 
 
 def _database_url() -> str:
-    """Return an explicit SQLite URL and refuse the production path."""
+    """Return an explicit SQLite URL with an explicit production guard."""
 
     x_args = context.get_x_argument(as_dictionary=True)
     value = x_args.get("db_path") or os.environ.get("DATABASE_URL")
@@ -46,10 +46,14 @@ def _database_url() -> str:
     if parsed.get_backend_name() != "sqlite" or not parsed.database or parsed.database == ":memory:":
         raise RuntimeError("T02-R accepts only an explicit file-backed SQLite candidate database")
     database_path = Path(parsed.database).resolve(strict=False)
-    if database_path == PRODUCTION_DATABASE:
+    allow_production = str(
+        config.attributes.get("frameflow_allow_production_migration", "")
+    ).strip().lower() in {"1", "true", "yes"}
+    if database_path == PRODUCTION_DATABASE and not allow_production:
         raise RuntimeError(
             f"T02-R refuses the production database path: {PRODUCTION_DATABASE}; "
-            "production cutover is deferred to T03-R"
+            "set the explicit production migration guard through the reviewed "
+            "production migration entry point"
         )
     return url
 

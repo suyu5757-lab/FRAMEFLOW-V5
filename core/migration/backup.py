@@ -50,10 +50,16 @@ def _read_only(path: Path) -> sqlite3.Connection:
         raise BackupError(f"SQLite source does not exist: {path}")
     connection: sqlite3.Connection | None = None
     try:
-        connection = sqlite3.connect(
-            f"file:{path.as_posix()}?mode=ro&immutable=1", uri=True
-        )
+        # Immutable mode intentionally ignores a live WAL. Use a normal
+        # read-only connection whenever sidecars exist so a consistent backup
+        # includes the current WAL view instead of only the main DB file.
+        query = "mode=ro"
+        if not Path(f"{path}-wal").exists():
+            query += "&immutable=1"
+        connection = sqlite3.connect(f"file:{path.as_posix()}?{query}", uri=True)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA query_only=ON")
         return connection
     except Exception:
         if connection is not None:

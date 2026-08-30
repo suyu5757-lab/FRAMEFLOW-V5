@@ -237,7 +237,7 @@ class T02RuntimeMigrationTests(unittest.TestCase):
         self.assertEqual([], first["errors"])
         connection = sqlite3.connect(candidate)
         try:
-            self.assertEqual([("20260826_01",)], connection.execute("SELECT version_num FROM alembic_version").fetchall())
+            self.assertEqual([("20260830_01",)], connection.execute("SELECT version_num FROM alembic_version").fetchall())
         finally:
             connection.close()
         downgrade_candidate(candidate)

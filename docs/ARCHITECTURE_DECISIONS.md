@@ -125,6 +125,33 @@ Missing, malformed, non-finite, zero, and negative values are configuration
 errors. Crossing the threshold requires explicit operator awareness and a later
 maintenance decision.
 
+## ADR-017 — Generation Result Artifact Binding
+
+**Problem:** The Runtime already records the input package manifest on a
+Generation, but it had no canonical relation for result Artifacts produced or
+imported by that Generation.
+
+**Decision:** Add nullable `artifacts.generation_id` as a foreign key to
+`generations.id`, with an index for Generation-result queries and restrictive
+delete behavior. A Generation may own zero or many result Artifacts.
+
+**Semantics:** `generations.package_manifest_artifact_id` remains the input
+package-manifest relation. Package, asset-master, frame, scene, prop, and
+other reference Artifacts keep `generation_id = NULL`. Provider or Manual
+result Artifacts use `generation_id = <owning generation>` and the existing
+`role = provider_result` convention.
+
+**Safety:** Existing rows are backfilled only with NULL; no path, role,
+timestamp, task, or Legacy V3 inference is allowed. The relation remains on
+the existing `artifacts` table; no result join table or single-result column
+is introduced. Cross-project and cross-shot consistency is a service-level
+invariant for the later Manual/Provider binder.
+
+**Consequence:** The Runtime remains an 11-domain-table model (12 SQLite
+tables including `alembic_version`) and can trace a result Artifact to its
+Generation, ProviderSubmission, source Task, and input provenance without
+using filesystem paths as authority.
+
 ## Freeze rules
 
 - Implementation, bug fixes, performance work, provider adapters, workflow/recipe additions, and UI refinement may follow the frozen decisions.

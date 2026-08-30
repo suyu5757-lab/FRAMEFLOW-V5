@@ -480,6 +480,7 @@ class StateStore:
         sha256: str | None = None,
         source_task_id: str | None = None,
         source_artifacts: Any | None = None,
+        generation_id: str | None = None,
         status: str = "DRAFT",
         event: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -497,6 +498,7 @@ class StateStore:
                 "version": version,
                 "source_task_id": source_task_id,
                 "source_artifacts_json": [] if source_artifacts is None else source_artifacts,
+                "generation_id": generation_id,
                 "status": status,
             },
             entity_id=artifact_id,

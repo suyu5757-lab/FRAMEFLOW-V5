@@ -174,6 +174,7 @@ class RuntimePersistence:
             "status": row.get("status"),
             "qa_decision": "Pending",
             "metadata": _json(row.get("source_artifacts_json"), {}),
+            "generation_id": row.get("generation_id"),
             "created_at": _timestamp(row.get("created_at")),
         }
 
