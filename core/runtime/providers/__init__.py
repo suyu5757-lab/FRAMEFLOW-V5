@@ -9,6 +9,7 @@ from .manual import (
     ReferenceArtifact,
     UploadChecklist,
 )
+from .mock import MockProviderAdapter
 
 __all__ = [
     "ManualAction",
@@ -16,6 +17,7 @@ __all__ = [
     "ManualIssue",
     "ManualOperationResult",
     "ManualProviderAdapter",
+    "MockProviderAdapter",
     "ReferenceArtifact",
     "UploadChecklist",
 ]
