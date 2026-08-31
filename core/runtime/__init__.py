@@ -3,6 +3,15 @@
 from importlib import import_module
 
 from .event_log import EventLog, EventLogError, InvalidEventError
+from .shot_state import (
+    ProjectionIssue,
+    ShotState7D,
+    ShotStateProjector,
+    StateEvidence,
+    derive_summary_state,
+    get_shot_state,
+    project_shot_state,
+)
 from .worker import (
     HandlerRegistry,
     TaskExecutionContext,
@@ -46,6 +55,10 @@ __all__ = [
     "EventLogError",
     "HandlerRegistry",
     "InvalidEventError",
+    "ProjectionIssue",
+    "ShotState7D",
+    "ShotStateProjector",
+    "StateEvidence",
     "LivenessResult",
     "LivenessState",
     "PROCESS_IDENTITIES",
@@ -64,4 +77,7 @@ __all__ = [
     "WorkerOutcome",
     "WorkerOwnershipLost",
     "WorkerRunResult",
+    "derive_summary_state",
+    "get_shot_state",
+    "project_shot_state",
 ]
