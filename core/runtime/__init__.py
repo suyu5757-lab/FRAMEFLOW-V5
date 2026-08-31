@@ -3,6 +3,14 @@
 from importlib import import_module
 
 from .event_log import EventLog, EventLogError, InvalidEventError
+from .continuity import (
+    ContinuityChecker,
+    ContinuityCheckResult,
+    ContinuityConflict,
+    ContinuityIssue,
+    ContinuityStatus,
+    check_continuity,
+)
 from .shot_state import (
     ProjectionIssue,
     ShotState7D,
@@ -53,6 +61,11 @@ def __getattr__(name: str):
 __all__ = [
     "EventLog",
     "EventLogError",
+    "ContinuityChecker",
+    "ContinuityCheckResult",
+    "ContinuityConflict",
+    "ContinuityIssue",
+    "ContinuityStatus",
     "HandlerRegistry",
     "InvalidEventError",
     "ProjectionIssue",
@@ -80,4 +93,5 @@ __all__ = [
     "derive_summary_state",
     "get_shot_state",
     "project_shot_state",
+    "check_continuity",
 ]
