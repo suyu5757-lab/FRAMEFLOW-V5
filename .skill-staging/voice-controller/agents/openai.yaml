@@ -1,0 +1,4 @@
+interface:
+  display_name: "Voice Controller"
+  short_description: "Route, gate, and hand off production audio"
+  default_prompt: "Use $voice-controller to route voice, music, and sound work, enforce QA and rights gates, and prepare a timeline-ready audio handoff."

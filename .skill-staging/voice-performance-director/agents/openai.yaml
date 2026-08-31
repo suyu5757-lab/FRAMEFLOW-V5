@@ -1,0 +1,4 @@
+interface:
+  display_name: "Voice Performance Director"
+  short_description: "Design and QA character voices and dialogue takes"
+  default_prompt: "Use $voice-performance-director to build voice profiles, auditions, dialogue tasks, and consent-aware take QA for my AI video."

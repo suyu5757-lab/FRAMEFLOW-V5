@@ -1,0 +1,4 @@
+interface:
+  display_name: "Music and Sound Designer"
+  short_description: "Design and QA music, ambience, and sound effects"
+  default_prompt: "Use $music-sound-designer to turn the brief into rights-aware music cues, ambience, SFX, stems, and QA-ready audio handoffs."
