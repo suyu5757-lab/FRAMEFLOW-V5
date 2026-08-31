@@ -11,6 +11,16 @@ from .continuity import (
     ContinuityStatus,
     check_continuity,
 )
+from .decision_engine import (
+    DecisionEngine,
+    DecisionInput,
+    DecisionIssue,
+    DecisionResult,
+    DecisionRoute,
+    DecisionStatus,
+    ProductionDecisionEngine,
+    decide_production_route,
+)
 from .shot_state import (
     ProjectionIssue,
     ShotState7D,
@@ -66,6 +76,12 @@ __all__ = [
     "ContinuityConflict",
     "ContinuityIssue",
     "ContinuityStatus",
+    "DecisionEngine",
+    "DecisionInput",
+    "DecisionIssue",
+    "DecisionResult",
+    "DecisionRoute",
+    "DecisionStatus",
     "HandlerRegistry",
     "InvalidEventError",
     "ProjectionIssue",
@@ -93,5 +109,7 @@ __all__ = [
     "derive_summary_state",
     "get_shot_state",
     "project_shot_state",
+    "ProductionDecisionEngine",
     "check_continuity",
+    "decide_production_route",
 ]
